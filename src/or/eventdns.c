@@ -89,6 +89,7 @@
 #include <stdarg.h>
 
 #include "eventdns.h"
+
 #ifdef WIN32
 #include <windows.h>
 #include <winsock2.h>
@@ -173,8 +174,6 @@ struct evdns_request {
 	/* these objects are kept in a circular list */
 	struct evdns_request *next, *prev;
 
-	u16 timeout_event_deleted; /**< Debugging: where was timeout_event
-								* deleted?  0 for "it's added." */
 	struct event timeout_event;
 
 	u16 trans_id;  /* the transaction id */
@@ -214,8 +213,6 @@ struct nameserver {
 	struct event event;
 	/* these objects are kept in a circular list */
 	struct nameserver *next, *prev;
-	u16 timeout_event_deleted; /**< Debugging: where was timeout_event
-								* deleted?  0 for "it's added." */
 	struct event timeout_event; /* used to keep the timeout for */
 								/* when we next probe this server. */
 								/* Valid if state == 0 */
@@ -474,33 +471,10 @@ sockaddr_eq(const struct sockaddr *sa1, const struct sockaddr *sa2,
 	return 1;
 }
 
-/* for debugging bug 929.  XXXX021 */
-static int
-_add_timeout_event(u16 *lineno, struct event *ev, struct timeval *to)
-{
-	*lineno = 0;
-	return evtimer_add(ev, to);
-}
-#define add_timeout_event(s, to) \
-	(_add_timeout_event(&(s)->timeout_event_deleted, &(s)->timeout_event, (to)))
-
-/* for debugging bug 929.  XXXX021 */
-static int
-_del_timeout_event(u16 *lineno, struct event *ev, int line)
-{
-	if (*lineno) {
-		log(EVDNS_LOG_WARN,
-			"Duplicate timeout event_del from line %d: first call "
-			"was at %d.", line, (int)*lineno);
-		return 0;
-	} else {
-		*lineno = (u16)line;
-		return event_del(ev);
-	}
-}
-#define del_timeout_event(s)											\
-	(_del_timeout_event(&(s)->timeout_event_deleted, &(s)->timeout_event, \
-						__LINE__))
+#define add_timeout_event(s, to)				\
+	(event_add(&(s)->timeout_event, (to)))
+#define del_timeout_event(s)					\
+	(event_del(&(s)->timeout_event))
 
 /* This walks the list of inflight requests to find the */
 /* one with a matching transaction id. Returns NULL on */
@@ -537,7 +511,7 @@ static void
 nameserver_probe_failed(struct nameserver *const ns) {
 	const struct timeval * timeout;
 	del_timeout_event(ns);
-	CLEAR(&ns->timeout_event);
+
 	if (ns->state == 1) {
 		/* This can happen if the nameserver acts in a way which makes us mark */
 		/* it as bad and then starts sending good replies. */
@@ -549,7 +523,6 @@ nameserver_probe_failed(struct nameserver *const ns) {
 										global_nameserver_timeouts_length - 1)];
 	ns->failed_times++;
 
-	evtimer_set(&ns->timeout_event, nameserver_prod_callback, ns);
 	if (add_timeout_event(ns, (struct timeval *) timeout) < 0) {
 		log(EVDNS_LOG_WARN,
 			"Error from libevent when adding timer event for %s",
@@ -578,7 +551,6 @@ nameserver_failed(struct nameserver *const ns, const char *msg) {
 	ns->state = 0;
 	ns->failed_times = 1;
 
-	evtimer_set(&ns->timeout_event, nameserver_prod_callback, ns);
 	if (add_timeout_event(ns, (struct timeval *) &global_nameserver_timeouts[0]) < 0) {
 		log(EVDNS_LOG_WARN,
 			"Error from libevent when adding timer event for %s",
@@ -614,7 +586,6 @@ nameserver_up(struct nameserver *const ns) {
 	log(EVDNS_LOG_WARN, "Nameserver %s is back up",
 		debug_ntop((struct sockaddr *)&ns->address));
 	del_timeout_event(ns);
-	CLEAR(&ns->timeout_event);
 	ns->state = 1;
 	ns->failed_times = 0;
 	ns->timedout = 0;
@@ -646,7 +617,6 @@ request_finished(struct evdns_request *const req, struct evdns_request **head) {
 	log(EVDNS_LOG_DEBUG, "Removing timeout for request %lx",
 		(unsigned long) req);
 	del_timeout_event(req);
-	CLEAR(&req->timeout_event);
 
 	search_request_finished(req);
 	global_requests_inflight--;
@@ -1279,7 +1249,7 @@ nameserver_read(struct nameserver *ns) {
 		if (r < 0) {
 			int err = last_error(ns->socket);
 			if (error_is_eagain(err)) return;
-			nameserver_failed(ns, strerror(err));
+			nameserver_failed(ns, tor_socket_strerror(err));
 			return;
 		}
 		/* XXX Match port too? */
@@ -1311,7 +1281,7 @@ server_port_read(struct evdns_server_port *s) {
 			int err = last_error(s->socket);
 			if (error_is_eagain(err)) return;
 			log(EVDNS_LOG_WARN, "Error %s (%d) while reading request.",
-				strerror(err), err);
+				tor_socket_strerror(err), err);
 			return;
 		}
 		request_parse(packet, r, s, (struct sockaddr*) &addr, addrlen);
@@ -1330,7 +1300,7 @@ server_port_flush(struct evdns_server_port *port)
 			int err = last_error(port->socket);
 			if (error_is_eagain(err))
 				return;
-			log(EVDNS_LOG_WARN, "Error %s (%d) while writing response to port; dropping", strerror(err), err);
+			log(EVDNS_LOG_WARN, "Error %s (%d) while writing response to port; dropping", tor_socket_strerror(err), err);
 		}
 		if (server_request_free(req)) {
 			/* we released the last reference to req->port. */
@@ -1822,7 +1792,7 @@ evdns_server_request_format_response(struct server_request *req, int err)
 	if (j > 512) {
 overflow:
 		j = 512;
-		buf[3] |= 0x02; /* set the truncated bit. */
+		buf[2] |= 0x02; /* set the truncated bit. */
 	}
 
 	req->response_len = (size_t)j;
@@ -2026,7 +1996,6 @@ evdns_request_timeout_callback(int fd, short events, void *arg) {
 		 * request_finished; that one already deletes the timeout event.
 		 * XXXX021 port this change to libevent. */
 		del_timeout_event(req);
-		CLEAR(&req->timeout_event);
 		evdns_request_transmit(req);
 	}
 }
@@ -2043,7 +2012,7 @@ evdns_request_transmit_to(struct evdns_request *req, struct nameserver *server) 
 	if (r < 0) {
 		int err = last_error(server->socket);
 		if (error_is_eagain(err)) return 1;
-		nameserver_failed(req->ns, strerror(err));
+		nameserver_failed(req->ns, tor_socket_strerror(err));
 		return 2;
 	} else if (r != (ssize_t)req->request_len) {
 		return 1;  /* short write */
@@ -2089,7 +2058,7 @@ evdns_request_transmit(struct evdns_request *req) {
 		/* transmitted; we need to check for timeout. */
 		log(EVDNS_LOG_DEBUG,
 			"Setting timeout for request %lx", (unsigned long) req);
-		evtimer_set(&req->timeout_event, evdns_request_timeout_callback, req);
+
 		if (add_timeout_event(req, &global_timeout) < 0) {
 			log(EVDNS_LOG_WARN,
 				"Error from libevent when adding timer for request %lx",
@@ -2204,7 +2173,6 @@ evdns_clear_nameservers_and_suspend(void)
 		(void) event_del(&server->event);
 		CLEAR(&server->event);
 		del_timeout_event(server);
-		CLEAR(&server->timeout_event);
 		if (server->socket >= 0)
 			CLOSE_SOCKET(server->socket);
 		CLEAR(server);
@@ -2222,7 +2190,6 @@ evdns_clear_nameservers_and_suspend(void)
 		req->ns = NULL;
 		/* ???? What to do about searches? */
 		del_timeout_event(req);
-		CLEAR(&req->timeout_event);
 		req->trans_id = 0;
 		req->transmit_me = 0;
 
@@ -2297,6 +2264,8 @@ _evdns_nameserver_add_impl(const struct sockaddr *address,
 	if (!ns) return -1;
 
 	memset(ns, 0, sizeof(struct nameserver));
+
+	evtimer_set(&ns->timeout_event, nameserver_prod_callback, ns);
 
 	ns->socket = socket(PF_INET, SOCK_DGRAM, 0);
 	if (ns->socket < 0) { err = 1; goto out1; }
@@ -2531,6 +2500,8 @@ request_new(int type, const char *name, int flags,
 	}
 
 	memset(req, 0, sizeof(struct evdns_request));
+
+	evtimer_set(&req->timeout_event, evdns_request_timeout_callback, req);
 
 	if (global_randomize_case) {
 		unsigned i;
@@ -2918,14 +2889,6 @@ evdns_resolv_set_defaults(int flags) {
 	if (flags & DNS_OPTION_NAMESERVERS) evdns_nameserver_ip_add("127.0.0.1");
 }
 
-#ifndef HAVE_STRTOK_R
-static char *
-strtok_r(char *s, const char *delim, char **state) {
-	(void)state;
-	return strtok(s, delim);
-}
-#endif
-
 /* helper version of atoi which returns -1 on error */
 static int
 strtoint(const char *const str) {
@@ -3002,9 +2965,9 @@ static void
 resolv_conf_parse_line(char *const start, int flags) {
 	char *strtok_state;
 	static const char *const delims = " \t";
-#define NEXT_TOKEN strtok_r(NULL, delims, &strtok_state)
+#define NEXT_TOKEN tor_strtok_r(NULL, delims, &strtok_state)
 
-	char *const first_token = strtok_r(start, delims, &strtok_state);
+	char *const first_token = tor_strtok_r(start, delims, &strtok_state);
 	if (!first_token) return;
 
 	if (!strcmp(first_token, "nameserver") && (flags & DNS_OPTION_NAMESERVERS)) {
@@ -3361,8 +3324,7 @@ evdns_shutdown(int fail_requests)
 		if (server->socket >= 0)
 			CLOSE_SOCKET(server->socket);
 		(void) event_del(&server->event);
-		if (server->state == 0)
-			del_timeout_event(server);
+		del_timeout_event(server);
 		CLEAR(server);
 		mm_free(server);
 		if (server_next == server_head)

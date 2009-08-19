@@ -1,6 +1,6 @@
-/* Copyright (c) 2003-2004, Roger Dingledinex
+/* Copyright (c) 2003-2004, Roger Dingledine
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #ifndef _TOR_COMPAT_H
@@ -267,6 +267,13 @@ extern const char TOR_TOLOWER_TABLE[];
 #define TOR_TOLOWER(c) (TOR_TOLOWER_TABLE[(uint8_t)c])
 #define TOR_TOUPPER(c) (TOR_TOUPPER_TABLE[(uint8_t)c])
 
+char *tor_strtok_r_impl(char *str, const char *sep, char **lasts);
+#ifdef HAVE_STRTOK_R
+#define tor_strtok_r(str, sep, lasts) strtok_r(str, sep, lasts)
+#else
+#define tor_strtok_r(str, sep, lasts) tor_strtok_r_impl(str, sep, lasts)
+#endif
+
 #ifdef MS_WINDOWS
 #define _SHORT_FILE_ (tor_fix_source_file(__FILE__))
 const char *tor_fix_source_file(const char *fname);
@@ -521,6 +528,9 @@ void tor_threads_init(void);
 #define tor_get_thread_id() (1UL)
 #define tor_threads_init() STMT_NIL
 #endif
+
+void set_main_thread(void);
+int in_main_thread(void);
 
 #ifdef TOR_IS_MULTITHREADED
 #if 0

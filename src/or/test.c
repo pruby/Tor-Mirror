@@ -1,6 +1,6 @@
 /* Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /* Ordinarily defined in tor_main.c; this bit is just here to provide one
@@ -2492,7 +2492,7 @@ test_util_gzip(void)
   test_assert(buf3);
   test_streq(buf1,buf3);
 
-  /* Check whether we can uncompress concatenated, compresed strings. */
+  /* Check whether we can uncompress concatenated, compressed strings. */
   tor_free(buf3);
   buf2 = tor_realloc(buf2, len1*2);
   memcpy(buf2+len1, buf2, len1);
@@ -2514,7 +2514,7 @@ test_util_gzip(void)
   test_assert(!tor_gzip_compress(&buf2, &len1, buf1, strlen(buf1)+1,
                                  ZLIB_METHOD));
   tor_assert(len1>16);
-  /* when we allow an uncomplete string, we should succeed.*/
+  /* when we allow an incomplete string, we should succeed.*/
   tor_assert(!tor_gzip_uncompress(&buf3, &len2, buf2, len1-16,
                                   ZLIB_METHOD, 0, LOG_INFO));
   buf3[len2]='\0';
@@ -3004,7 +3004,7 @@ test_dir_format(void)
   test_assert(!crypto_pk_get_fingerprint(pk2, fingerprint, 1));
   strlcat(buf2, fingerprint, sizeof(buf2));
   strlcat(buf2, "\nuptime 0\n"
-  /* XXX the "0" above is hardcoded, but even if we made it reflect
+  /* XXX the "0" above is hard-coded, but even if we made it reflect
    * uptime, that still wouldn't make it right, because the two
    * descriptors might be made on different seconds... hm. */
          "bandwidth 1000 5000 10000\n"
@@ -3230,6 +3230,72 @@ test_dirutil(void)
  done:
   SMARTLIST_FOREACH(sl, fp_pair_t *, pair, tor_free(pair));
   smartlist_free(sl);
+}
+
+static void
+test_dirutil_measured_bw(void)
+{
+  measured_bw_line_t mbwl;
+  int i;
+  const char *lines_pass[] = {
+    "node_id=$557365204145532d32353620696e73746561642e bw=1024\n",
+    "node_id=$557365204145532d32353620696e73746561642e\t  bw=1024 \n",
+    " node_id=$557365204145532d32353620696e73746561642e  bw=1024\n",
+    "\tnoise\tnode_id=$557365204145532d32353620696e73746561642e  "
+                "bw=1024 junk=007\n",
+    "misc=junk node_id=$557365204145532d32353620696e73746561642e  "
+                "bw=1024 junk=007\n",
+    "end"
+  };
+  const char *lines_fail[] = {
+    /* Test possible python stupidity on input */
+    "node_id=None bw=1024\n",
+    "node_id=$None bw=1024\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=None\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=1024.0\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=.1024\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=1.024\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=1024 bw=0\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=1024 bw=None\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=-1024\n",
+    /* Test incomplete writes due to race conditions, partial copies, etc */
+    "node_i",
+    "node_i\n",
+    "node_id=",
+    "node_id=\n",
+    "node_id=$557365204145532d32353620696e73746561642e bw=",
+    "node_id=$557365204145532d32353620696e73746561642e bw=1024",
+    "node_id=$557365204145532d32353620696e73746561642e bw=\n",
+    "node_id=$557365204145532d32353620696e7374",
+    "node_id=$557365204145532d32353620696e7374\n",
+    "",
+    "\n",
+    " \n ",
+    " \n\n",
+    /* Test assorted noise */
+    " node_id= ",
+    "node_id==$557365204145532d32353620696e73746561642e bw==1024\n",
+    "node_id=$55736520414552d32353620696e73746561642e bw=1024\n",
+    "node_id=557365204145532d32353620696e73746561642e bw=1024\n",
+    "node_id= $557365204145532d32353620696e73746561642e bw=0.23\n",
+    "end"
+  };
+
+  for (i = 0; strcmp(lines_fail[i], "end"); i++) {
+    //fprintf(stderr, "Testing: %s\n", lines_fail[i]);
+    test_assert(measured_bw_line_parse(&mbwl, lines_fail[i]) == -1);
+  }
+
+  for (i = 0; strcmp(lines_pass[i], "end"); i++) {
+    //fprintf(stderr, "Testing: %s %d\n", lines_pass[i], TOR_ISSPACE('\n'));
+    test_assert(measured_bw_line_parse(&mbwl, lines_pass[i]) == 0);
+    test_assert(mbwl.bw == 1024);
+    test_assert(strcmp(mbwl.node_hex,
+                "557365204145532d32353620696e73746561642e") == 0);
+  }
+
+done:
+  return;
 }
 
 extern const char AUTHORITY_CERT_1[];
@@ -3511,6 +3577,17 @@ test_v3_networkstatus(void)
   test_eq(rs->or_port, 443);
   test_eq(rs->dir_port, 0);
   test_eq(vrs->flags, U64_LITERAL(254)); // all flags except "authority."
+
+  {
+    measured_bw_line_t mbw;
+    memset(mbw.node_id, 33, sizeof(mbw.node_id));
+    mbw.bw = 1024;
+    test_assert(measured_bw_line_apply(&mbw,
+                v1->routerstatus_list) == 1);
+    vrs = smartlist_get(v1->routerstatus_list, 2);
+    test_assert(vrs->status.has_measured_bw &&
+                vrs->status.measured_bw == 1024);
+  }
 
   /* Generate second vote. It disagrees on some of the times,
    * and doesn't list versions, and knows some crazy flags */
@@ -4000,78 +4077,6 @@ test_policies(void)
   }
 }
 
-/** Run unit tests for basic rendezvous functions. */
-static void
-test_rend_fns(void)
-{
-  char address1[] = "fooaddress.onion";
-  char address2[] = "aaaaaaaaaaaaaaaa.onion";
-  char address3[] = "fooaddress.exit";
-  char address4[] = "www.torproject.org";
-  rend_service_descriptor_t *d1 =
-    tor_malloc_zero(sizeof(rend_service_descriptor_t));
-  rend_service_descriptor_t *d2 = NULL;
-  char *encoded = NULL;
-  size_t len;
-  time_t now;
-  int i;
-  crypto_pk_env_t *pk1 = pk_generate(0), *pk2 = pk_generate(1);
-
-  /* Test unversioned (v0) descriptor */
-  d1->pk = crypto_pk_dup_key(pk1);
-  now = time(NULL);
-  d1->timestamp = now;
-  d1->version = 0;
-  d1->intro_nodes = smartlist_create();
-  for (i = 0; i < 3; i++) {
-    rend_intro_point_t *intro = tor_malloc_zero(sizeof(rend_intro_point_t));
-    intro->extend_info = tor_malloc_zero(sizeof(extend_info_t));
-    crypto_rand(intro->extend_info->identity_digest, DIGEST_LEN);
-    intro->extend_info->nickname[0] = '$';
-    base16_encode(intro->extend_info->nickname+1, HEX_DIGEST_LEN+1,
-                  intro->extend_info->identity_digest, DIGEST_LEN);
-    smartlist_add(d1->intro_nodes, intro);
-  }
-  test_assert(! rend_encode_service_descriptor(d1, pk1, &encoded, &len));
-  d2 = rend_parse_service_descriptor(encoded, len);
-  test_assert(d2);
-
-  test_assert(!crypto_pk_cmp_keys(d1->pk, d2->pk));
-  test_eq(d2->timestamp, now);
-  test_eq(d2->version, 0);
-  test_eq(d2->protocols, 1<<2);
-  test_eq(smartlist_len(d2->intro_nodes), 3);
-  for (i = 0; i < 3; i++) {
-    rend_intro_point_t *intro1 = smartlist_get(d1->intro_nodes, i);
-    rend_intro_point_t *intro2 = smartlist_get(d2->intro_nodes, i);
-    test_streq(intro1->extend_info->nickname,
-               intro2->extend_info->nickname);
-  }
-
-  test_assert(BAD_HOSTNAME == parse_extended_hostname(address1));
-  test_assert(ONION_HOSTNAME == parse_extended_hostname(address2));
-  test_assert(EXIT_HOSTNAME == parse_extended_hostname(address3));
-  test_assert(NORMAL_HOSTNAME == parse_extended_hostname(address4));
-
-  crypto_free_pk_env(pk1);
-  crypto_free_pk_env(pk2);
-  pk1 = pk2 = NULL;
-  rend_service_descriptor_free(d1);
-  rend_service_descriptor_free(d2);
-  d1 = d2 = NULL;
-
- done:
-  if (pk1)
-    crypto_free_pk_env(pk1);
-  if (pk2)
-    crypto_free_pk_env(pk2);
-  if (d1)
-    rend_service_descriptor_free(d1);
-  if (d2)
-    rend_service_descriptor_free(d2);
-  tor_free(encoded);
-}
-
 /** Run AES performance benchmarks. */
 static void
 bench_aes(void)
@@ -4356,6 +4361,39 @@ test_util_datadir(void)
   tor_free(f);
 }
 
+static void
+test_util_strtok(void)
+{
+  char buf[128];
+  char buf2[128];
+  char *cp1, *cp2;
+  strlcpy(buf, "Graved on the dark in gestures of descent", sizeof(buf));
+  strlcpy(buf2, "they.seemed;their!own;most.perfect;monument", sizeof(buf2));
+  /*  -- "Year's End", Richard Wilbur */
+
+  test_streq("Graved", tor_strtok_r_impl(buf, " ", &cp1));
+  test_streq("they", tor_strtok_r_impl(buf2, ".!..;!", &cp2));
+#define S1() tor_strtok_r_impl(NULL, " ", &cp1)
+#define S2() tor_strtok_r_impl(NULL, ".!..;!", &cp2)
+  test_streq("on", S1());
+  test_streq("the", S1());
+  test_streq("dark", S1());
+  test_streq("seemed", S2());
+  test_streq("their", S2());
+  test_streq("own", S2());
+  test_streq("in", S1());
+  test_streq("gestures", S1());
+  test_streq("of", S1());
+  test_streq("most", S2());
+  test_streq("perfect", S2());
+  test_streq("descent", S1());
+  test_streq("monument", S2());
+  test_assert(NULL == S1());
+  test_assert(NULL == S2());
+ done:
+  ;
+}
+
 /** Test AES-CTR encryption and decryption with IV. */
 static void
 test_crypto_aes_iv(void)
@@ -4539,9 +4577,9 @@ test_crypto_base32_decode(void)
   ;
 }
 
-/** Test encoding and parsing of v2 rendezvous service descriptors. */
+/** Test encoding and parsing of rendezvous service descriptors. */
 static void
-test_rend_fns_v2(void)
+test_rend_fns(void)
 {
   rend_service_descriptor_t *generated = NULL, *parsed = NULL;
   char service_id[DIGEST_LEN];
@@ -4556,6 +4594,16 @@ test_rend_fns_v2(void)
   size_t intro_points_size;
   size_t encoded_size;
   int i;
+  char address1[] = "fooaddress.onion";
+  char address2[] = "aaaaaaaaaaaaaaaa.onion";
+  char address3[] = "fooaddress.exit";
+  char address4[] = "www.torproject.org";
+
+  test_assert(BAD_HOSTNAME == parse_extended_hostname(address1, 1));
+  test_assert(ONION_HOSTNAME == parse_extended_hostname(address2, 1));
+  test_assert(EXIT_HOSTNAME == parse_extended_hostname(address3, 1));
+  test_assert(NORMAL_HOSTNAME == parse_extended_hostname(address4, 1));
+
   pk1 = pk_generate(0);
   pk2 = pk_generate(1);
   generated = tor_malloc_zero(sizeof(rend_service_descriptor_t));
@@ -4678,25 +4726,25 @@ test_geoip(void)
   get_options()->BridgeRecordUsageByCountry = 1;
   /* Put 9 observations in AB... */
   for (i=32; i < 40; ++i)
-    geoip_note_client_seen(GEOIP_CLIENT_CONNECT, i, now);
-  geoip_note_client_seen(GEOIP_CLIENT_CONNECT, 225, now);
+    geoip_note_client_seen(GEOIP_CLIENT_CONNECT, i, now-7200);
+  geoip_note_client_seen(GEOIP_CLIENT_CONNECT, 225, now-7200);
   /* and 3 observations in XY, several times. */
   for (j=0; j < 10; ++j)
     for (i=52; i < 55; ++i)
       geoip_note_client_seen(GEOIP_CLIENT_CONNECT, i, now-3600);
   /* and 17 observations in ZZ... */
   for (i=110; i < 127; ++i)
-    geoip_note_client_seen(GEOIP_CLIENT_CONNECT, i, now-7200);
+    geoip_note_client_seen(GEOIP_CLIENT_CONNECT, i, now);
   s = geoip_get_client_history(now+5*24*60*60, GEOIP_CLIENT_CONNECT);
   test_assert(s);
   test_streq("zz=24,ab=16,xy=8", s);
   tor_free(s);
 
-  /* Now clear out all the zz observations. */
+  /* Now clear out all the AB observations. */
   geoip_remove_old_clients(now-6000);
   s = geoip_get_client_history(now+5*24*60*60, GEOIP_CLIENT_CONNECT);
   test_assert(s);
-  test_streq("ab=16,xy=8", s);
+  test_streq("zz=24,xy=8", s);
 
  done:
   tor_free(s);
@@ -4754,13 +4802,14 @@ static struct {
   SUBENT(util, threads),
   SUBENT(util, order_functions),
   SUBENT(util, sscanf),
+  SUBENT(util, strtok),
   ENT(onion_handshake),
   ENT(dir_format),
   ENT(dirutil),
+  SUBENT(dirutil, measured_bw),
   ENT(v3_networkstatus),
   ENT(policies),
   ENT(rend_fns),
-  SUBENT(rend_fns, v2),
   ENT(geoip),
 
   DISABLED(bench_aes),
@@ -4856,12 +4905,13 @@ main(int c, char**v)
   }
 
   options->command = CMD_RUN_UNITTESTS;
-  crypto_global_init(0);
+  crypto_global_init(0, NULL, NULL);
   rep_hist_init();
   network_init();
   setup_directory();
   options_init(options);
   options->DataDirectory = tor_strdup(temp_dir);
+  options->EntryStatistics = 1;
   if (set_options(options, &errmsg) < 0) {
     printf("Failed to set initial options: %s\n", errmsg);
     tor_free(errmsg);

@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -160,6 +160,7 @@ connection_edge_destroy(circid_t circ_id, edge_connection_t *conn)
              "CircID %d: At an edge. Marking connection for close.", circ_id);
     if (conn->_base.type == CONN_TYPE_AP) {
       connection_mark_unattached_ap(conn, END_STREAM_REASON_DESTROY);
+      control_event_stream_bandwidth(conn);
       control_event_stream_status(conn, STREAM_EVENT_CLOSED,
                                   END_STREAM_REASON_DESTROY);
       conn->end_reason |= END_STREAM_REASON_FLAG_ALREADY_SENT_CLOSED;
@@ -265,7 +266,7 @@ connection_edge_end(edge_connection_t *conn, uint8_t reason)
   return 0;
 }
 
-/** An error has just occured on an operation on an edge connection
+/** An error has just occurred on an operation on an edge connection
  * <b>conn</b>.  Extract the errno; convert it to an end reason, and send an
  * appropriate relay end cell to the other end of the connection's circuit.
  **/
@@ -332,8 +333,10 @@ connection_edge_finished_connecting(edge_connection_t *edge_conn)
            escaped_safe_str(conn->address),conn->port,
            safe_str(fmt_addr(&conn->addr)));
 
+  rep_hist_note_exit_stream_opened(conn->port, approx_time());
+
   conn->state = EXIT_CONN_STATE_OPEN;
-  connection_watch_events(conn, EV_READ); /* stop writing, continue reading */
+  connection_watch_events(conn, READ_EVENT); /* stop writing, keep reading */
   if (connection_wants_to_flush(conn)) /* in case there are any queued relay
                                         * cells */
     connection_start_writing(conn);
@@ -508,10 +511,10 @@ connection_ap_attach_pending(void)
   });
 }
 
-/** Tell any AP streams that are waiting for a onehop tunnel to
+/** Tell any AP streams that are waiting for a one-hop tunnel to
  * <b>failed_digest</b> that they are going to fail. */
 /* XXX022 We should get rid of this function, and instead attach
- * onehop streams to circ->p_streams so they get marked in
+ * one-hop streams to circ->p_streams so they get marked in
  * circuit_mark_for_close like normal p_streams. */
 void
 connection_ap_fail_onehop(const char *failed_digest,
@@ -542,7 +545,7 @@ connection_ap_fail_onehop(const char *failed_digest,
           build_state->chosen_exit->port != edge_conn->socks_request->port)
         continue;
     }
-    log_info(LD_APP, "Closing onehop stream to '%s/%s' because the OR conn "
+    log_info(LD_APP, "Closing one-hop stream to '%s/%s' because the OR conn "
                      "just failed.", edge_conn->chosen_exit_name,
                      edge_conn->socks_request->address);
     connection_mark_unattached_ap(edge_conn, END_STREAM_REASON_TIMEOUT);
@@ -630,12 +633,12 @@ connection_ap_detach_retriable(edge_connection_t *conn, origin_circuit_t *circ,
  * - A MapAddress command from the controller [permanent]
  * - An AddressMap directive in the torrc [permanent]
  * - When a TrackHostExits torrc directive is triggered [temporary]
- * - When a dns resolve succeeds [temporary]
- * - When a dns resolve fails [temporary]
+ * - When a DNS resolve succeeds [temporary]
+ * - When a DNS resolve fails [temporary]
  *
  * When an addressmap request is made but one is already registered,
  * the new one is replaced only if the currently registered one has
- * no "new_address" (that is, it's in the process of dns resolve),
+ * no "new_address" (that is, it's in the process of DNS resolve),
  * or if the new one is permanent (expires==0 or 1).
  *
  * (We overload the 'expires' field, using "0" for mappings set via
@@ -954,7 +957,7 @@ client_dns_incr_failures(const char *address)
   return ent->num_resolve_failures;
 }
 
-/** If <b>address</b> is in the client dns addressmap, reset
+/** If <b>address</b> is in the client DNS addressmap, reset
  * the number of resolve failures we have on record for it.
  * This is used when we fail a stream because it won't resolve:
  * otherwise future attempts on that address will only try once.
@@ -1480,10 +1483,12 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
   /* Parse the address provided by SOCKS.  Modify it in-place if it
    * specifies a hidden-service (.onion) or particular exit node (.exit).
    */
-  addresstype = parse_extended_hostname(socks->address);
+  addresstype = parse_extended_hostname(socks->address,
+                         remapped_to_exit || options->AllowDotExit);
 
   if (addresstype == BAD_HOSTNAME) {
-    log_warn(LD_APP, "Invalid hostname %s; rejecting", socks->address);
+    log_warn(LD_APP, "Invalid onion hostname %s; rejecting",
+             safe_str(socks->address));
     control_event_client_status(LOG_WARN, "SOCKS_BAD_HOSTNAME HOSTNAME=%s",
                                 escaped(socks->address));
     connection_mark_unattached_ap(conn, END_STREAM_REASON_TORPROTOCOL);
@@ -1492,7 +1497,7 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
 
   if (addresstype == EXIT_HOSTNAME) {
     /* foo.exit -- modify conn->chosen_exit_node to specify the exit
-     * node, and conn->address to hold only the address portion.*/
+     * node, and conn->address to hold only the address portion. */
     char *s = strrchr(socks->address,'.');
     tor_assert(!automap);
     if (s) {
@@ -1675,34 +1680,14 @@ connection_ap_handshake_rewrite_and_attach(edge_connection_t *conn,
       conn->_base.state = AP_CONN_STATE_RENDDESC_WAIT;
       log_info(LD_REND, "Unknown descriptor %s. Fetching.",
                safe_str(conn->rend_data->onion_address));
-      /* Fetch both, v0 and v2 rend descriptors in parallel. Use whichever
-       * arrives first. Exception: When using client authorization, only
-       * fetch v2 descriptors.*/
       rend_client_refetch_v2_renddesc(conn->rend_data);
-      if (conn->rend_data->auth_type == REND_NO_AUTH)
-        rend_client_refetch_renddesc(conn->rend_data->onion_address);
     } else { /* r > 0 */
-/** How long after we receive a hidden service descriptor do we consider
- * it valid? */
-#define NUM_SECONDS_BEFORE_HS_REFETCH (60*15)
-      if (now - entry->received < NUM_SECONDS_BEFORE_HS_REFETCH) {
-        conn->_base.state = AP_CONN_STATE_CIRCUIT_WAIT;
-        log_info(LD_REND, "Descriptor is here and fresh enough. Great.");
-        if (connection_ap_handshake_attach_circuit(conn) < 0) {
-          if (!conn->_base.marked_for_close)
-            connection_mark_unattached_ap(conn, END_STREAM_REASON_CANT_ATTACH);
-          return -1;
-        }
-      } else {
-        conn->_base.state = AP_CONN_STATE_RENDDESC_WAIT;
-        log_info(LD_REND, "Stale descriptor %s. Refetching.",
-                 safe_str(conn->rend_data->onion_address));
-        /* Fetch both, v0 and v2 rend descriptors in parallel. Use whichever
-         * arrives first. Exception: When using client authorization, only
-         * fetch v2 descriptors.*/
-        rend_client_refetch_v2_renddesc(conn->rend_data);
-        if (conn->rend_data->auth_type == REND_NO_AUTH)
-          rend_client_refetch_renddesc(conn->rend_data->onion_address);
+      conn->_base.state = AP_CONN_STATE_CIRCUIT_WAIT;
+      log_info(LD_REND, "Descriptor is here. Great.");
+      if (connection_ap_handshake_attach_circuit(conn) < 0) {
+        if (!conn->_base.marked_for_close)
+          connection_mark_unattached_ap(conn, END_STREAM_REASON_CANT_ATTACH);
+        return -1;
       }
     }
     return 0;
@@ -1716,7 +1701,7 @@ int
 get_pf_socket(void)
 {
   int pf;
-  /*  This should be opened before dropping privs. */
+  /*  This should be opened before dropping privileges. */
   if (pf_socket >= 0)
     return pf_socket;
 
@@ -1889,14 +1874,6 @@ connection_ap_handshake_process_socks(edge_connection_t *conn)
                               END_STREAM_REASON_FLAG_ALREADY_SOCKS_REPLIED);
     return -1;
   } /* else socks handshake is done, continue processing */
-
-  if (hostname_is_noconnect_address(socks->address))
-  {
-    control_event_stream_status(conn, STREAM_EVENT_NEW, 0);
-    control_event_stream_status(conn, STREAM_EVENT_CLOSED, 0);
-    connection_mark_unattached_ap(conn, END_STREAM_REASON_DONE);
-    return -1;
-  }
 
   if (SOCKS_COMMAND_IS_CONNECT(socks->command))
     control_event_stream_status(conn, STREAM_EVENT_NEW, 0);
@@ -2567,6 +2544,11 @@ connection_exit_begin_conn(cell_t *cell, circuit_t *circ)
 
   log_debug(LD_EXIT,"Creating new exit connection.");
   n_stream = edge_connection_new(CONN_TYPE_EXIT, AF_INET);
+#ifdef ENABLE_DIRREQ_STATS
+  /* Remember the tunneled request ID in the new edge connection, so that
+   * we can measure download times. */
+  TO_CONN(n_stream)->dirreq_id = circ->dirreq_id;
+#endif
   n_stream->_base.purpose = EXIT_PURPOSE_CONNECT;
 
   n_stream->stream_id = rh.stream_id;
@@ -2736,9 +2718,9 @@ connection_exit_connect(edge_connection_t *edge_conn)
     case 0:
       conn->state = EXIT_CONN_STATE_CONNECTING;
 
-      connection_watch_events(conn, EV_WRITE | EV_READ);
+      connection_watch_events(conn, READ_EVENT | WRITE_EVENT);
       /* writable indicates finish;
-       * readable/error indicates broken link in windowsland. */
+       * readable/error indicates broken link in windows-land. */
       return;
     /* case 1: fall through */
   }
@@ -2749,7 +2731,7 @@ connection_exit_connect(edge_connection_t *edge_conn)
     log_warn(LD_BUG,"newly connected conn had data waiting!");
 //    connection_start_writing(conn);
   }
-  connection_watch_events(conn, EV_READ);
+  connection_watch_events(conn, READ_EVENT);
 
   /* also, deliver a 'connected' cell back through the circuit. */
   if (connection_edge_is_rendezvous_stream(edge_conn)) {
@@ -2803,6 +2785,11 @@ connection_exit_connect_dir(edge_connection_t *exitconn)
   dirconn->_base.purpose = DIR_PURPOSE_SERVER;
   dirconn->_base.state = DIR_CONN_STATE_SERVER_COMMAND_WAIT;
 
+#ifdef ENABLE_DIRREQ_STATS
+  /* Note that the new dir conn belongs to the same tunneled request as
+   * the edge conn, so that we can measure download times. */
+  TO_CONN(dirconn)->dirreq_id = TO_CONN(exitconn)->dirreq_id;
+#endif
   connection_link_connections(TO_CONN(dirconn), TO_CONN(exitconn));
 
   if (connection_add(TO_CONN(exitconn))<0) {
@@ -2908,14 +2895,14 @@ connection_ap_can_use_exit(edge_connection_t *conn, routerinfo_t *exit)
 /** If address is of the form "y.onion" with a well-formed handle y:
  *     Put a NUL after y, lower-case it, and return ONION_HOSTNAME.
  *
- * If address is of the form "y.exit":
+ * If address is of the form "y.exit" and <b>allowdotexit</b> is true:
  *     Put a NUL after y and return EXIT_HOSTNAME.
  *
  * Otherwise:
  *     Return NORMAL_HOSTNAME and change nothing.
  */
 hostname_type_t
-parse_extended_hostname(char *address)
+parse_extended_hostname(char *address, int allowdotexit)
 {
     char *s;
     char query[REND_SERVICE_ID_LEN_BASE32+1];
@@ -2924,14 +2911,19 @@ parse_extended_hostname(char *address)
     if (!s)
       return NORMAL_HOSTNAME; /* no dot, thus normal */
     if (!strcmp(s+1,"exit")) {
-      *s = 0; /* nul-terminate it */
-      return EXIT_HOSTNAME; /* .exit */
+      if (allowdotexit) {
+        *s = 0; /* NUL-terminate it */
+        return EXIT_HOSTNAME; /* .exit */
+      } /* else */
+      log_warn(LD_APP, "The \".exit\" notation is disabled in Tor due to "
+               "security risks. Set AllowDotExit in your torrc to enable it.");
+      /* FFFF send a controller event too to notify Vidalia users */
     }
     if (strcmp(s+1,"onion"))
       return NORMAL_HOSTNAME; /* neither .exit nor .onion, thus normal */
 
     /* so it is .onion */
-    *s = 0; /* nul-terminate it */
+    *s = 0; /* NUL-terminate it */
     if (strlcpy(query, address, REND_SERVICE_ID_LEN_BASE32+1) >=
         REND_SERVICE_ID_LEN_BASE32+1)
       goto failed;
@@ -2942,13 +2934,5 @@ failed:
     /* otherwise, return to previous state and return 0 */
     *s = '.';
     return BAD_HOSTNAME;
-}
-
-/** Check if the address is of the form "y.noconnect"
- */
-int
-hostname_is_noconnect_address(const char *address)
-{
-  return ! strcasecmpend(address, ".noconnect");
 }
 

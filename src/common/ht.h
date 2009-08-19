@@ -1,5 +1,6 @@
-/* Copyright 2002 Christopher Clark */
-/* Copyright 2005 Nick Mathewson */
+/* Copyright (c) 2002, Christopher Clark.
+ * Copyright (c) 2005-2006, Nick Mathewson.
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See license at end. */
 
 /* Based on ideas by Christopher Clark and interfaces from Niels Provos. */
@@ -40,6 +41,10 @@
 /* How many elements in 'head'? */
 #define HT_SIZE(head)                           \
   ((head)->hth_n_entries)
+
+/* Return memory usage for a hashtable (not counting the entries themselves) */
+#define HT_MEM_USAGE(head)                         \
+  (sizeof(*head) + (head)->hth_table_length * sizeof(void*))
 
 #define HT_FIND(name, head, elm)     name##_HT_FIND((head), (elm))
 #define HT_INSERT(name, head, elm)   name##_HT_INSERT((head), (elm))
@@ -425,7 +430,7 @@ ht_string_hash(const char *s)
 
 /*
  * Copyright 2005, Nick Mathewson.  Implementation logic is adapted from code
- * by Cristopher Clark, retrofit to allow drop-in memory management, and to
+ * by Christopher Clark, retrofit to allow drop-in memory management, and to
  * use the same interface as Niels Provos's HT_H.  I'm not sure whether this
  * is a derived work any more, but whether it is or not, the license below
  * applies.

@@ -1,6 +1,6 @@
 /* Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #define DIRVOTE_PRIVATE
@@ -103,7 +103,10 @@ format_networkstatus_vote(crypto_pk_env_t *private_signing_key,
     tor_snprintf(status, len,
                  "network-status-version 3\n"
                  "vote-status %s\n"
-                 "consensus-methods 1 2 3 4 5\n"
+                 /* XXX: If you change this value, you also need to
+                  * change consensus_method_is_supported().
+                  * Perhaps we should unify these somehow? */
+                 "consensus-methods 1 2 3 4 5 6\n"
                  "published %s\n"
                  "valid-after %s\n"
                  "fresh-until %s\n"
@@ -142,7 +145,7 @@ format_networkstatus_vote(crypto_pk_env_t *private_signing_key,
   SMARTLIST_FOREACH(v3_ns->routerstatus_list, vote_routerstatus_t *, vrs,
   {
     if (routerstatus_format_entry(outp, endp-outp, &vrs->status,
-                                  vrs->version, 0, 0) < 0) {
+                                  vrs->version, NS_V3_VOTE) < 0) {
       log_warn(LD_BUG, "Unable to print router status.");
       goto err;
     }
@@ -341,7 +344,7 @@ _compare_vote_rs(const void **_a, const void **_b)
 /** Given a list of vote_routerstatus_t, all for the same router identity,
  * return whichever is most frequent, breaking ties in favor of more
  * recently published vote_routerstatus_t and in case of ties there,
- * in favour of smaller descriptor digest.
+ * in favor of smaller descriptor digest.
  */
 static vote_routerstatus_t *
 compute_routerstatus_consensus(smartlist_t *votes)
@@ -455,11 +458,14 @@ compute_consensus_method(smartlist_t *votes)
 static int
 consensus_method_is_supported(int method)
 {
-  return (method >= 1) && (method <= 5);
+  /* XXX: If you change this value, you also need to change
+   * format_networkstatus_vote(). Perhaps we should unify
+   * these somehow? */
+  return (method >= 1) && (method <= 6);
 }
 
 /** Helper: given <b>lst</b>, a list of version strings such that every
- * version appears once for every versioning voter who recommends it, returna
+ * version appears once for every versioning voter who recommends it, return a
  * newly allocated string holding the resulting client-versions or
  * server-versions list. May change contents of <b>lst</b> */
 static char *
@@ -701,7 +707,10 @@ networkstatus_compute_consensus(smartlist_t *votes,
     smartlist_t *versions = smartlist_create();
     smartlist_t *exitsummaries = smartlist_create();
     uint32_t *bandwidths = tor_malloc(sizeof(uint32_t) * smartlist_len(votes));
+    uint32_t *measured_bws = tor_malloc(sizeof(uint32_t) *
+                                        smartlist_len(votes));
     int num_bandwidths;
+    int num_mbws;
 
     int *n_voter_flags; /* n_voter_flags[j] is the number of flags that
                          * votes[j] knows about. */
@@ -835,6 +844,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
       smartlist_clear(chosen_flags);
       smartlist_clear(versions);
       num_bandwidths = 0;
+      num_mbws = 0;
 
       /* Okay, go through all the entries for this digest. */
       SMARTLIST_FOREACH_BEGIN(votes, networkstatus_t *, v) {
@@ -843,7 +853,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
         rs = smartlist_get(v->routerstatus_list, index[v_sl_idx]);
         if (memcmp(rs->status.identity_digest, lowest_id, DIGEST_LEN))
           continue; /* doesn't include this router. */
-        /* At this point, we know that we're looking at a routersatus with
+        /* At this point, we know that we're looking at a routerstatus with
          * identity "lowest".
          */
         ++index[v_sl_idx];
@@ -868,6 +878,9 @@ networkstatus_compute_consensus(smartlist_t *votes,
         }
 
         /* count bandwidths */
+        if (rs->status.has_measured_bw)
+          measured_bws[num_mbws++] = rs->status.measured_bw;
+
         if (rs->status.has_bandwidth)
           bandwidths[num_bandwidths++] = rs->status.bandwidth;
       } SMARTLIST_FOREACH_END(v);
@@ -945,7 +958,10 @@ networkstatus_compute_consensus(smartlist_t *votes,
       }
 
       /* Pick a bandwidth */
-      if (consensus_method >= 5 && num_bandwidths > 0) {
+      if (consensus_method >= 6 && num_mbws > 2) {
+        rs_out.has_bandwidth = 1;
+        rs_out.bandwidth = median_uint32(measured_bws, num_mbws);
+      } else if (consensus_method >= 5 && num_bandwidths > 0) {
         rs_out.has_bandwidth = 1;
         rs_out.bandwidth = median_uint32(bandwidths, num_bandwidths);
       }
@@ -955,7 +971,7 @@ networkstatus_compute_consensus(smartlist_t *votes,
        * that descriptor.  If everybody plays nice all the voters who
        * listed that descriptor will have the same summary.  If not then
        * something is fishy and we'll use the most common one (breaking
-       * ties in favor of lexigraphically larger one (only because it
+       * ties in favor of lexicographically larger one (only because it
        * lets me reuse more existing code.
        *
        * The other case that can happen is that no authority that voted
@@ -996,8 +1012,8 @@ networkstatus_compute_consensus(smartlist_t *votes,
           char dd[HEX_DIGEST_LEN+1];
           base16_encode(id, sizeof(dd), rs_out.identity_digest, DIGEST_LEN);
           base16_encode(dd, sizeof(dd), rs_out.descriptor_digest, DIGEST_LEN);
-          log_warn(LD_DIR, "The voters disgreed on the exit policy summary for"
-                   " router %s with descriptor %s.  This really shouldn't"
+          log_warn(LD_DIR, "The voters disagreed on the exit policy summary "
+                   " for router %s with descriptor %s.  This really shouldn't"
                    " have happened.", id, dd);
 
           smartlist_sort_strings(exitsummaries);
@@ -1036,7 +1052,8 @@ networkstatus_compute_consensus(smartlist_t *votes,
 
       /* Okay!! Now we can write the descriptor... */
       /*     First line goes into "buf". */
-      routerstatus_format_entry(buf, sizeof(buf), &rs_out, NULL, 1, 0);
+      routerstatus_format_entry(buf, sizeof(buf), &rs_out, NULL,
+                                NS_V3_CONSENSUS);
       smartlist_add(chunks, tor_strdup(buf));
       /*     Second line is all flags.  The "\n" is missing. */
       smartlist_add(chunks,
@@ -1055,8 +1072,10 @@ networkstatus_compute_consensus(smartlist_t *votes,
           log_warn(LD_BUG, "Not enough space in buffer for weight line.");
           *buf = '\0';
         }
+
         smartlist_add(chunks, tor_strdup(buf));
       };
+
       /*     Now the exitpolicy summary line. */
       if (rs_out.has_exitsummary) {
         char buf[MAX_POLICY_LINE_LEN+1];
@@ -2101,7 +2120,7 @@ dirvote_add_signatures_to_pending_consensus(
   return r;
 }
 
-/** Helper: we just got the <b>deteached_signatures_body</b> sent to us as
+/** Helper: we just got the <b>detached_signatures_body</b> sent to us as
  * signatures on the currently pending consensus.  Add them to the pending
  * consensus (if we have one); otherwise queue them until we have a
  * consensus.  Return negative on failure, nonnegative on success. */
@@ -2117,7 +2136,7 @@ dirvote_add_signatures(const char *detached_signatures_body,
                                      detached_signatures_body, msg);
   } else {
     log_notice(LD_DIR, "Got a signature from %s. "
-                       "Queueing it for the next consensus.", source);
+                       "Queuing it for the next consensus.", source);
     if (!pending_consensus_signature_list)
       pending_consensus_signature_list = smartlist_create();
     smartlist_add(pending_consensus_signature_list,
@@ -2183,7 +2202,7 @@ dirvote_get_pending_consensus(void)
 }
 
 /** Return the signatures that we know for the consensus that we're currently
- * trying to build */
+ * trying to build. */
 const char *
 dirvote_get_pending_detached_signatures(void)
 {

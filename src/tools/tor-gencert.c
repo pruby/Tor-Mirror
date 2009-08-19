@@ -1,4 +1,4 @@
-/* Copyright (c) 2007-2008 The Tor Project, Inc. */
+/* Copyright (c) 2007-2009 The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #include "orconfig.h"
@@ -496,7 +496,7 @@ main(int argc, char **argv)
   init_logging();
 
   /* Don't bother using acceleration. */
-  if (crypto_global_init(0)) {
+  if (crypto_global_init(0, NULL, NULL)) {
     fprintf(stderr, "Couldn't initialize crypto library.\n");
     return 1;
   }

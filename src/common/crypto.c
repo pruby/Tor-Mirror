@@ -1,7 +1,7 @@
 /* Copyright (c) 2001, Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -18,7 +18,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincrypt.h>
-/* Windows defines this; so does openssl 0.9.8h and later. We don't actually
+/* Windows defines this; so does OpenSSL 0.9.8h and later. We don't actually
  * use either definition. */
 #undef OCSP_RESPONSE
 #endif
@@ -27,6 +27,7 @@
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
 #include <openssl/evp.h>
+#include <openssl/engine.h>
 #include <openssl/rand.h>
 #include <openssl/opensslv.h>
 #include <openssl/bn.h>
@@ -56,7 +57,7 @@
 #include "compat.h"
 
 #if OPENSSL_VERSION_NUMBER < 0x00907000l
-#error "We require openssl >= 0.9.7"
+#error "We require OpenSSL >= 0.9.7"
 #endif
 
 #include <openssl/engine.h>
@@ -67,13 +68,13 @@
 #define PRIVATE_KEY_OK(k) ((k) && (k)->key && (k)->key->p)
 
 #ifdef TOR_IS_MULTITHREADED
-/** A number of prealloced mutexes for use by openssl. */
+/** A number of preallocated mutexes for use by OpenSSL. */
 static tor_mutex_t **_openssl_mutexes = NULL;
-/** How many mutexes have we allocated for use by openssl? */
+/** How many mutexes have we allocated for use by OpenSSL? */
 static int _n_openssl_mutexes = 0;
 #endif
 
-/** A public key, or a public/private keypair. */
+/** A public key, or a public/private key-pair. */
 struct crypto_pk_env_t
 {
   int refs; /* reference counting so we don't have to copy keys */
@@ -166,36 +167,70 @@ log_engine(const char *fn, ENGINE *e)
   }
 }
 
+/** Try to load an engine in a shared library via fully qualified path.
+ */
+static ENGINE *
+try_load_engine(const char *path, const char *engine)
+{
+  ENGINE *e = ENGINE_by_id("dynamic");
+  if (e) {
+    if (!ENGINE_ctrl_cmd_string(e, "ID", engine, 0) ||
+        !ENGINE_ctrl_cmd_string(e, "DIR_LOAD", "2", 0) ||
+        !ENGINE_ctrl_cmd_string(e, "DIR_ADD", path, 0) ||
+        !ENGINE_ctrl_cmd_string(e, "LOAD", NULL, 0)) {
+      ENGINE_free(e);
+      e = NULL;
+    }
+  }
+  return e;
+}
+
 /** Initialize the crypto library.  Return 0 on success, -1 on failure.
  */
 int
-crypto_global_init(int useAccel)
+crypto_global_init(int useAccel, const char *accelName, const char *accelDir)
 {
   if (!_crypto_global_initialized) {
     ERR_load_crypto_strings();
     OpenSSL_add_all_algorithms();
     _crypto_global_initialized = 1;
     setup_openssl_threading();
-    /* XXX the below is a bug, since we can't know if we're supposed
-     * to be using hardware acceleration or not. we should arrange
-     * for this function to be called before init_keys. But make it
-     * not complain loudly, at least until we make acceleration work. */
-    if (useAccel < 0) {
-      log_info(LD_CRYPTO, "Initializing OpenSSL via tor_tls_init().");
-    }
     if (useAccel > 0) {
+      ENGINE *e = NULL;
       log_info(LD_CRYPTO, "Initializing OpenSSL engine support.");
       ENGINE_load_builtin_engines();
-      if (!ENGINE_register_all_complete())
-        return -1;
-
-      /* XXXX make sure this isn't leaking. */
+      ENGINE_register_all_complete();
+      if (accelName) {
+        if (accelDir) {
+          log_info(LD_CRYPTO, "Trying to load dynamic OpenSSL engine \"%s\""
+                   " via path \"%s\".", accelName, accelDir);
+          e = try_load_engine(accelName, accelDir);
+        } else {
+          log_info(LD_CRYPTO, "Initializing dynamic OpenSSL engine \"%s\""
+                   " acceleration support.", accelName);
+          e = ENGINE_by_id(accelName);
+        }
+        if (!e) {
+          log_warn(LD_CRYPTO, "Unable to load dynamic OpenSSL engine \"%s\".",
+                   accelName);
+        } else {
+          log_info(LD_CRYPTO, "Loaded dynamic OpenSSL engine \"%s\".",
+                   accelName);
+        }
+      }
+      if (e) {
+        log_info(LD_CRYPTO, "Loaded OpenSSL hardware acceleration engine,"
+                 " setting default ciphers.");
+        ENGINE_set_default(e, ENGINE_METHOD_ALL);
+      }
       log_engine("RSA", ENGINE_get_default_RSA());
       log_engine("DH", ENGINE_get_default_DH());
       log_engine("RAND", ENGINE_get_default_RAND());
       log_engine("SHA1", ENGINE_get_digest_engine(NID_sha1));
       log_engine("3DES", ENGINE_get_cipher_engine(NID_des_ede3_ecb));
       log_engine("AES", ENGINE_get_cipher_engine(NID_aes_128_ecb));
+    } else {
+      log_info(LD_CRYPTO, "NOT using OpenSSL engine support.");
     }
     return crypto_seed_rng(1);
   }
@@ -405,10 +440,10 @@ crypto_pk_generate_key(crypto_pk_env_t *env)
   if (env->key)
     RSA_free(env->key);
 #if OPENSSL_VERSION_NUMBER < 0x00908000l
-  /* In openssl 0.9.7, RSA_generate_key is all we have. */
+  /* In OpenSSL 0.9.7, RSA_generate_key is all we have. */
   env->key = RSA_generate_key(PK_BYTES*8,65537, NULL, NULL);
 #else
-  /* In openssl 0.9.8, RSA_generate_key is deprecated. */
+  /* In OpenSSL 0.9.8, RSA_generate_key is deprecated. */
   {
     BIGNUM *e = BN_new();
     RSA *r = NULL;
@@ -452,7 +487,7 @@ crypto_pk_read_private_key_from_string(crypto_pk_env_t *env,
   tor_assert(env);
   tor_assert(s);
 
-  /* Create a read-only memory BIO, backed by the nul-terminated string 's' */
+  /* Create a read-only memory BIO, backed by the NUL-terminated string 's' */
   b = BIO_new_mem_buf((char*)s, -1);
 
   if (env->key)
@@ -1054,7 +1089,7 @@ crypto_pk_asn1_decode(const char *str, size_t len)
   RSA *rsa;
   unsigned char *buf;
   /* This ifdef suppresses a type warning.  Take out the first case once
-   * everybody is using openssl 0.9.7 or later.
+   * everybody is using OpenSSL 0.9.7 or later.
    */
   const unsigned char *cp;
   cp = buf = tor_malloc(len);
@@ -1393,7 +1428,7 @@ crypto_digest_add_bytes(crypto_digest_env_t *digest, const char *data,
   tor_assert(digest);
   tor_assert(data);
   /* Using the SHA1_*() calls directly means we don't support doing
-   * sha1 in hardware. But so far the delay of getting the question
+   * SHA1 in hardware. But so far the delay of getting the question
    * to the hardware, and hearing the answer, is likely higher than
    * just doing it ourselves. Hashes are fast.
    */
@@ -1554,7 +1589,7 @@ crypto_dh_generate_public(crypto_dh_env_t *dh)
   if (tor_check_dh_key(dh->dh->pub_key)<0) {
     log_warn(LD_CRYPTO, "Weird! Our own DH key was invalid.  I guess once-in-"
              "the-universe chances really do happen.  Trying again.");
-    /* Free and clear the keys, so openssl will actually try again. */
+    /* Free and clear the keys, so OpenSSL will actually try again. */
     BN_free(dh->dh->pub_key);
     BN_free(dh->dh->priv_key);
     dh->dh->pub_key = dh->dh->priv_key = NULL;
@@ -1593,7 +1628,7 @@ crypto_dh_get_public(crypto_dh_env_t *dh, char *pubkey, size_t pubkey_len)
   return 0;
 }
 
-/** Check for bad diffie-hellman public keys (g^x).  Return 0 if the key is
+/** Check for bad Diffie-Hellman public keys (g^x).  Return 0 if the key is
  * okay (in the subgroup [2,p-2]), or -1 if it's bad.
  * See http://www.cl.cam.ac.uk/ftp/users/rja14/psandqs.ps.gz for some tips.
  */
@@ -1742,11 +1777,11 @@ crypto_dh_free(crypto_dh_env_t *dh)
  * work for us too. */
 #define ADD_ENTROPY 32
 
-/* Use RAND_poll if openssl is 0.9.6 release or later.  (The "f" means
+/* Use RAND_poll if OpenSSL is 0.9.6 release or later.  (The "f" means
    "release".)  */
 #define HAVE_RAND_POLL (OPENSSL_VERSION_NUMBER >= 0x0090600fl)
 
-/* Versions of openssl prior to 0.9.7k and 0.9.8c had a bug where RAND_poll
+/* Versions of OpenSSL prior to 0.9.7k and 0.9.8c had a bug where RAND_poll
  * would allocate an fd_set on the stack, open a new file, and try to FD_SET
  * that fd without checking whether it fit in the fd_set.  Thus, if the
  * system has not just been started up, it is unsafe to call */
@@ -2281,7 +2316,7 @@ secret_to_key(char *key_out, size_t key_out_len, const char *secret,
 }
 
 #ifdef TOR_IS_MULTITHREADED
-/** Helper: openssl uses this callback to manipulate mutexes. */
+/** Helper: OpenSSL uses this callback to manipulate mutexes. */
 static void
 _openssl_locking_cb(int mode, int n, const char *file, int line)
 {
@@ -2298,12 +2333,13 @@ _openssl_locking_cb(int mode, int n, const char *file, int line)
     tor_mutex_release(_openssl_mutexes[n]);
 }
 
-/** OpenSSL helper type: wraps a Tor mutex so that openssl can  */
+/** OpenSSL helper type: wraps a Tor mutex so that OpenSSL can use it
+ * as a lock. */
 struct CRYPTO_dynlock_value {
   tor_mutex_t *lock;
 };
 
-/** Openssl callback function to allocate a lock: see CRYPTO_set_dynlock_*
+/** OpenSSL callback function to allocate a lock: see CRYPTO_set_dynlock_*
  * documentation in OpenSSL's docs for more info. */
 static struct CRYPTO_dynlock_value *
 _openssl_dynlock_create_cb(const char *file, int line)
@@ -2316,7 +2352,7 @@ _openssl_dynlock_create_cb(const char *file, int line)
   return v;
 }
 
-/** Openssl callback function to acquire or release a lock: see
+/** OpenSSL callback function to acquire or release a lock: see
  * CRYPTO_set_dynlock_* documentation in OpenSSL's docs for more info. */
 static void
 _openssl_dynlock_lock_cb(int mode, struct CRYPTO_dynlock_value *v,
@@ -2330,7 +2366,7 @@ _openssl_dynlock_lock_cb(int mode, struct CRYPTO_dynlock_value *v,
     tor_mutex_release(v->lock);
 }
 
-/** Openssl callback function to free a lock: see CRYPTO_set_dynlock_*
+/** OpenSSL callback function to free a lock: see CRYPTO_set_dynlock_*
  * documentation in OpenSSL's docs for more info. */
 static void
 _openssl_dynlock_destroy_cb(struct CRYPTO_dynlock_value *v,

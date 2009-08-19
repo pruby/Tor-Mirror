@@ -1,6 +1,6 @@
 /* Copyright (c) 2003, Roger Dingledine
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -258,7 +258,9 @@ _tor_malloc_roundup(size_t *sizep DMALLOC_PARAMS)
 #ifdef HAVE_MALLOC_GOOD_SIZE
   *sizep = malloc_good_size(*sizep);
   return _tor_malloc(*sizep DMALLOC_FN_ARGS);
-#elif defined(HAVE_MALLOC_USABLE_SIZE) && !defined(USE_DMALLOC)
+#elif 0 && defined(HAVE_MALLOC_USABLE_SIZE) && !defined(USE_DMALLOC)
+  /* Never use malloc_usable_size(); it makes valgrind really unhappy,
+   * and doesn't win much in terms of usable space where it exists. */
   void *result = _tor_malloc(*sizep DMALLOC_FN_ARGS);
   *sizep = malloc_usable_size(result);
   return result;
@@ -341,6 +343,36 @@ round_to_power_of_2(uint64_t u64)
     return high;
   else
     return low;
+}
+
+/** Return the lowest x such that x is at least <b>number</b>, and x modulo
+ * <b>divisor</b> == 0. */
+unsigned
+round_to_next_multiple_of(unsigned number, unsigned divisor)
+{
+  number += divisor - 1;
+  number -= number % divisor;
+  return number;
+}
+
+/** Return the lowest x such that x is at least <b>number</b>, and x modulo
+ * <b>divisor</b> == 0. */
+uint32_t
+round_uint32_to_next_multiple_of(uint32_t number, uint32_t divisor)
+{
+  number += divisor - 1;
+  number -= number % divisor;
+  return number;
+}
+
+/** Return the lowest x such that x is at least <b>number</b>, and x modulo
+ * <b>divisor</b> == 0. */
+uint64_t
+round_uint64_to_next_multiple_of(uint64_t number, uint64_t divisor)
+{
+  number += divisor - 1;
+  number -= number % divisor;
+  return number;
 }
 
 /* =====
@@ -1000,12 +1032,31 @@ tv_udiff(const struct timeval *start, const struct timeval *end)
   long secdiff = end->tv_sec - start->tv_sec;
 
   if (labs(secdiff+1) > LONG_MAX/1000000) {
-    log_warn(LD_GENERAL, "comparing times too far apart.");
+    log_warn(LD_GENERAL, "comparing times on microsecond detail too far "
+             "apart: %ld seconds", secdiff);
     return LONG_MAX;
   }
 
   udiff = secdiff*1000000L + (end->tv_usec - start->tv_usec);
   return udiff;
+}
+
+/** Return the number of milliseconds elapsed between *start and *end.
+ */
+long
+tv_mdiff(const struct timeval *start, const struct timeval *end)
+{
+  long mdiff;
+  long secdiff = end->tv_sec - start->tv_sec;
+
+  if (labs(secdiff+1) > LONG_MAX/1000) {
+    log_warn(LD_GENERAL, "comparing times on millisecond detail too far "
+             "apart: %ld seconds", secdiff);
+    return LONG_MAX;
+  }
+
+  mdiff = secdiff*1000L + (end->tv_usec - start->tv_usec) / 1000L;
+  return mdiff;
 }
 
 /** Yield true iff <b>y</b> is a leap-year. */
@@ -1086,7 +1137,7 @@ format_rfc1123_time(char *buf, time_t t)
 /** Parse the the RFC1123 encoding of some time (in GMT) from <b>buf</b>,
  * and store the result in *<b>t</b>.
  *
- * Return 0 on succcess, -1 on failure.
+ * Return 0 on success, -1 on failure.
 */
 int
 parse_rfc1123_time(const char *buf, time_t *t)
@@ -1317,7 +1368,7 @@ format_time_interval(char *out, size_t out_len, long interval)
  * ===== */
 
 #ifndef TIME_IS_FAST
-/** Cached estimate of the currrent time.  Updated around once per second;
+/** Cached estimate of the current time.  Updated around once per second;
  * may be a few seconds off if we are really busy.  This is a hack to avoid
  * calling time(NULL) (which not everybody has optimized) on critical paths.
  */
@@ -1348,7 +1399,7 @@ update_approx_time(time_t now)
  * XXXX022 Use this consistently or rip most of it out.
  * ===== */
 
-/* In a perfect world, everybody would run ntp, and ntp would be perfect, so
+/* In a perfect world, everybody would run NTP, and NTP would be perfect, so
  * if we wanted to know "Is the current time before time X?" we could just say
  * "time(NULL) < X".
  *
@@ -2478,6 +2529,8 @@ start_daemon(void)
     if (fork() != 0) {
       exit(0);
     }
+    set_main_thread(); /* We are now the main thread. */
+
     return;
   }
 }

@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -299,25 +299,6 @@ connection_link_connections(connection_t *conn_a, connection_t *conn_b)
   conn_b->linked_conn = conn_a;
 }
 
-/** Tell libevent that we don't care about <b>conn</b> any more. */
-void
-connection_unregister_events(connection_t *conn)
-{
-  if (conn->read_event) {
-    if (event_del(conn->read_event))
-      log_warn(LD_BUG, "Error removing read event for %d", conn->s);
-    tor_free(conn->read_event);
-  }
-  if (conn->write_event) {
-    if (event_del(conn->write_event))
-      log_warn(LD_BUG, "Error removing write event for %d", conn->s);
-    tor_free(conn->write_event);
-  }
-  if (conn->dns_server_port) {
-    dnsserv_close_listener(conn);
-  }
-}
-
 /** Deallocate memory used by <b>conn</b>. Deallocate its buffers if
  * necessary, close its socket if necessary, and mark the directory as dirty
  * if <b>conn</b> is an OR or OP connection.
@@ -369,7 +350,7 @@ _connection_free(connection_t *conn)
     buf_free(conn->outbuf);
   } else {
     if (conn->socket_family == AF_UNIX) {
-      /* For now only control ports can be unix domain sockets
+      /* For now only control ports can be Unix domain sockets
        * and listeners at the same time */
       tor_assert(conn->type == CONN_TYPE_CONTROL_LISTENER);
 
@@ -474,7 +455,7 @@ connection_free(connection_t *conn)
 }
 
 /** Call _connection_free() on every connection in our array, and release all
- * storage helpd by connection.c. This is used by cpuworkers and dnsworkers
+ * storage held by connection.c. This is used by cpuworkers and dnsworkers
  * when they fork, so they don't keep resources held open (especially
  * sockets).
  *
@@ -544,13 +525,6 @@ connection_about_to_close_connection(connection_t *conn)
          * failed: forget about this router, and maybe try again. */
         connection_dir_request_failed(dir_conn);
       }
-      if (conn->purpose == DIR_PURPOSE_FETCH_RENDDESC && dir_conn->rend_data) {
-        /* Give it a try. However, there is no re-fetching for v0 rend
-         * descriptors; if the response is empty or the descriptor is
-         * unusable, close pending connections (unless a v2 request is
-         * still in progress). */
-        rend_client_desc_trynow(dir_conn->rend_data->onion_address, 0);
-      }
       /* If we were trying to fetch a v2 rend desc and did not succeed,
        * retry as needed. (If a fetch is successful, the connection state
        * is changed to DIR_PURPOSE_HAS_FETCHED_RENDDESC to mark that
@@ -618,6 +592,7 @@ connection_about_to_close_connection(connection_t *conn)
                  conn->marked_for_close_file, conn->marked_for_close);
         dnsserv_reject_request(edge_conn);
       }
+      control_event_stream_bandwidth(edge_conn);
       control_event_stream_status(edge_conn, STREAM_EVENT_CLOSED,
                                   edge_conn->end_reason);
       circ = circuit_get_by_edge_conn(edge_conn);
@@ -746,7 +721,7 @@ connection_expire_held_open(void)
  * for the new structure.  If no port is provided in <b>listenaddress</b> then
  * <b>listenport</b> is used.
  *
- * If not NULL <b>readable_addrress</b> will contain a copy of the host part of
+ * If not NULL <b>readable_address</b> will contain a copy of the host part of
  * <b>listenaddress</b>.
  *
  * The listenaddr struct has to be freed by the caller.
@@ -783,14 +758,14 @@ create_inet_sockaddr(const char *listenaddress, uint16_t listenport,
 
 #ifdef HAVE_SYS_UN_H
 /** Create an AF_UNIX listenaddr struct.
- * <b>listenaddress</b> provides the path to the unix socket.
+ * <b>listenaddress</b> provides the path to the Unix socket.
  *
  * Eventually <b>listenaddress</b> will also optionally contain user, group,
  * and file permissions for the new socket.  But not yet. XXX
  * Also, since we do not create the socket here the information doesn't help
  * here.
  *
- * If not NULL <b>readable_addrress</b> will contain a copy of the path part of
+ * If not NULL <b>readable_address</b> will contain a copy of the path part of
  * <b>listenaddress</b>.
  *
  * The listenaddr struct has to be freed by the caller.
@@ -918,7 +893,7 @@ connection_create_listener(struct sockaddr *listensockaddr, socklen_t socklen,
   } else if (listensockaddr->sa_family == AF_UNIX) {
     start_reading = 1;
 
-    /* For now only control ports can be unix domain sockets
+    /* For now only control ports can be Unix domain sockets
      * and listeners at the same time */
     tor_assert(type == CONN_TYPE_CONTROL_LISTENER);
 
@@ -1150,7 +1125,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
     newconn->address = tor_dup_addr(&addr);
 
   } else if (conn->socket_family == AF_UNIX) {
-    /* For now only control ports can be unix domain sockets
+    /* For now only control ports can be Unix domain sockets
      * and listeners at the same time */
     tor_assert(conn->type == CONN_TYPE_CONTROL_LISTENER);
 
@@ -1178,7 +1153,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
 }
 
 /** Initialize states for newly accepted connection <b>conn</b>.
- * If conn is an OR, start the tls handshake.
+ * If conn is an OR, start the TLS handshake.
  * If conn is a transparent AP, get its original destination
  * and place it in circuit_wait.
  */
@@ -1727,10 +1702,16 @@ connection_buckets_decrement(connection_t *conn, time_t now,
     tor_fragile_assert();
   }
 
-  if (num_read > 0)
+  if (num_read > 0) {
+    if (conn->type == CONN_TYPE_EXIT)
+      rep_hist_note_exit_bytes_read(conn->port, num_read, now);
     rep_hist_note_bytes_read(num_read, now);
-  if (num_written > 0)
+  }
+  if (num_written > 0) {
+    if (conn->type == CONN_TYPE_EXIT)
+      rep_hist_note_exit_bytes_written(conn->port, num_written, now);
     rep_hist_note_bytes_written(num_written, now);
+  }
 
   if (connection_counts_as_relayed_traffic(conn, now)) {
     global_relayed_read_bucket -= (int)num_read;
@@ -1809,7 +1790,7 @@ connection_bucket_init(void)
   }
 }
 
-/** Refill a single <b>bucket</b> called <b>name</b> with bandwith rate
+/** Refill a single <b>bucket</b> called <b>name</b> with bandwidth rate
  * <b>rate</b> and bandwidth burst <b>burst</b>, assuming that
  * <b>seconds_elapsed</b> seconds have passed since the last call.
  **/
@@ -2321,6 +2302,13 @@ connection_handle_write(connection_t *conn, int force)
     /* else open, or closing */
     result = flush_buf_tls(or_conn->tls, conn->outbuf,
                            max_to_write, &conn->outbuf_flushlen);
+#ifdef ENABLE_DIRREQ_STATS
+    /* If we just flushed the last bytes, check if this tunneled dir
+     * request is done. */
+    if (buf_datalen(conn->outbuf) == 0 && conn->dirreq_id)
+      geoip_change_dirreq_state(conn->dirreq_id, DIRREQ_TUNNELED,
+                                DIRREQ_OR_CONN_BUFFER_FLUSHED);
+#endif
     switch (result) {
       CASE_TOR_TLS_ERROR_ANY:
       case TOR_TLS_CLOSE:
@@ -2576,13 +2564,11 @@ connection_get_by_type_state(int type, int state)
 
 /** Return a connection of type <b>type</b> that has rendquery equal
  * to <b>rendquery</b>, and that is not marked for close. If state
- * is non-zero, conn must be of that state too. If rendversion is
- * nonnegative, conn must be fetching that rendversion, too.
+ * is non-zero, conn must be of that state too.
  */
 connection_t *
 connection_get_by_type_state_rendquery(int type, int state,
-                                       const char *rendquery,
-                                       int rendversion)
+                                       const char *rendquery)
 {
   smartlist_t *conns = get_connection_array();
 
@@ -2597,8 +2583,6 @@ connection_get_by_type_state_rendquery(int type, int state,
         (!state || state == conn->state)) {
       if (type == CONN_TYPE_DIR &&
           TO_DIR_CONN(conn)->rend_data &&
-          (rendversion < 0 ||
-           rendversion == TO_DIR_CONN(conn)->rend_data->rend_desc_version) &&
           !rend_cmp_service_ids(rendquery,
                                 TO_DIR_CONN(conn)->rend_data->onion_address))
         return conn;

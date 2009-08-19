@@ -1,10 +1,263 @@
-Changes in version 0.2.1.15??? - ????-??-??
+Changes in version 0.2.2.1-alpha - 2009-0?-??
+  o Major features:
+    - Add support for dynamic OpenSSL hardware crypto acceleration engines
+      via new AccelName and AccelDir options.
+
+  o New options for gathering stats safely:
+    - Directories that configure with --enable-dirreq-stats and set
+      "DirReqStatistics 1" write directory request stats to disk every
+      24 hours. As compared to the --enable-geoip-stats flag in 0.2.1.x,
+      there are a few improvements: 1) stats are written to disk exactly
+      every 24 hours; 2) estimated shares of v2 and v3 requests are
+      determined as mean values, not at the end of a measurement period;
+      3) unresolved requests are listed with country code '??';
+      4) directories also measure download times.
+    - Exit nodes that configure with --enable-exit-stats and set
+      "ExitPortStatistics 1" write statistics on the number of exit
+      streams and transferred bytes per port to disk every 24 hours.
+    - Relays that configure with --enable-buffer-stats and set
+      "CellStatistics 1" write statistics to disk every 24 hours on how
+      long cells spend in their circuit queues.
+    - Entry nodes that configure with --enable-entry-stats and set
+      "EntryStatistics 1" write statistics to disk every 24 hours on
+      the rough number and origins of connecting clients.
+
+  o Minor features:
+    - New --digests command-line switch to output the digests of the
+      source files Tor was built with.
+    - The "torify" script now uses torsocks where available.
+    - The memarea code now uses a sentinel value at the end of each area
+      to make sure nothing writes beyond the end of an area.  This might
+      help debug some conceivable causes of bug 930.
+    - Time and memory units in the configuration file can now be set to
+      fractional units.  For example, "2.5 MB" is now a valid value for
+      AccountingMax.
+    - Certain Tor clients (such as those behind check.torproject.org) may
+      want to fetch the consensus in an extra early manner. To enable this
+      a user may now set FetchDirInfoExtraEarly to 1. This also depends on
+      setting FetchDirInfoEarly to 1. Previous behavior will stay the same
+      as only certain clients who must have this information sooner should
+      set this option.
+
+  o Deprecated and removed features:
+    - The controller no longer accepts the old obsolete "addr-mappings/"
+      or "unregistered-servers-" GETINFO values.
+    - Hidden services no longer publish version 0 descriptors, and clients
+      do not request or use version 0 descriptors. However, the authorities
+      still accept and serve version 0 descriptors when contacted by older
+      hidden services/clients.
+    - The EXTENDED_EVENTS and VERBOSE_NAMES controller features are now
+      always on; using them is necessary for correct forward-compatible
+      controllers.
+    - Removal of support for .noconnect style addresses.
+
+
+Changes in version 0.2.1.20 - 2009-??-??
+  o Major bugfixes:
+    - Send circuit or stream sendme cells when our window has decreased
+      by 100 cells, not when it has decreased by 101 cells. Bug uncovered
+      by Karsten when testing the "reduce circuit window" performance
+      patch. Bugfix on the 54th commit on Tor -- from July 2002,
+      before the release of Tor 0.0.0. This is the new winner of the
+      oldest-bug prize.
+
+  o New directory authorities:
+    - Set up urras (run by Jacob Appelbaum) as the seventh v3 directory
+      authority.
+
   o Minor bugfixes:
-    - Actually return -1 in the error case for read_bandwidth_usage. Bug
-      was harmless, we currently don't care for the return value anywhere.
-      Bugfix on 0.2.0.9-alpha.
+    - Fix a signed/unsigned compile warning in 0.2.1.19.
+    - Fix possible segmentation fault on directory authorities. Bugfix on
+      0.2.1.14-rc.
+
+
+Changes in version 0.2.1.19 - 2009-07-28
+  Tor 0.2.1.19 fixes a major bug with accessing and providing hidden
+  services on Tor 0.2.1.3-alpha through 0.2.1.18.
+
+  o Major bugfixes:
+    - Make accessing hidden services on 0.2.1.x work right again.
+      Bugfix on 0.2.1.3-alpha; workaround for bug 1038. Diagnosis and
+      part of patch provided by "optimist".
+
+  o Minor features:
+    - When a relay/bridge is writing out its identity key fingerprint to
+      the "fingerprint" file and to its logs, write it without spaces. Now
+      it will look like the fingerprints in our bridges documentation,
+      and confuse fewer users.
+
+  o Minor bugfixes:
+    - Relays no longer publish a new server descriptor if they change
+      their MaxAdvertisedBandwidth config option but it doesn't end up
+      changing their advertised bandwidth numbers. Bugfix on 0.2.0.28-rc;
+      fixes bug 1026. Patch from Sebastian.
+    - Avoid leaking memory every time we get a create cell but we have
+      so many already queued that we refuse it. Bugfix on 0.2.0.19-alpha;
+      fixes bug 1034. Reported by BarkerJr.
+
+
+Changes in version 0.2.1.18 - 2009-07-24
+  Tor 0.2.1.18 lays the foundations for performance improvements,
+  adds status events to help users diagnose bootstrap problems, adds
+  optional authentication/authorization for hidden services, fixes a
+  variety of potential anonymity problems, and includes a huge pile of
+  other features and bug fixes.
+
+  o Build fixes:
+    - Add LIBS=-lrt to Makefile.am so the Tor RPMs use a static libevent.
+
+
+Changes in version 0.2.1.17-rc - 2009-07-07
+  Tor 0.2.1.17-rc marks the fourth -- and hopefully last -- release
+  candidate for the 0.2.1.x series. It lays the groundwork for further
+  client performance improvements, and also fixes a big bug with directory
+  authorities that were causing them to assign Guard and Stable flags
+  poorly.
+
+  The Windows bundles also finally include the geoip database that we
+  thought we'd been shipping since 0.2.0.x (oops), and the OS X bundles
+  should actually install Torbutton rather than giving you a cryptic
+  failure message (oops).
+
+  o Major features:
+    - Clients now use the bandwidth values in the consensus, rather than
+      the bandwidth values in each relay descriptor. This approach opens
+      the door to more accurate bandwidth estimates once the directory
+      authorities start doing active measurements. Implements more of
+      proposal 141.
+
+  o Major bugfixes:
+    - When Tor clients restart after 1-5 days, they discard all their
+      cached descriptors as too old, but they still use the cached
+      consensus document. This approach is good for robustness, but
+      bad for performance: since they don't know any bandwidths, they
+      end up choosing at random rather than weighting their choice by
+      speed. Fixed by the above feature of putting bandwidths in the
+      consensus. Bugfix on 0.2.0.x.
+    - Directory authorities were neglecting to mark relays down in their
+      internal histories if the relays fall off the routerlist without
+      ever being found unreachable. So there were relays in the histories
+      that haven't been seen for eight months, and are listed as being
+      up for eight months. This wreaked havoc on the "median wfu"
+      and "median mtbf" calculations, in turn making Guard and Stable
+      flags very wrong, hurting network performance. Fixes bugs 696 and
+      969. Bugfix on 0.2.0.6-alpha.
+
+  o Minor bugfixes:
+    - Serve the DirPortFrontPage page even when we have been approaching
+      our quotas recently. Fixes bug 1013; bugfix on 0.2.1.8-alpha.
+    - The control port would close the connection before flushing long
+      replies, such as the network consensus, if a QUIT command was issued
+      before the reply had completed. Now, the control port flushes all
+      pending replies before closing the connection. Also fixed a spurious
+      warning when a QUIT command is issued after a malformed or rejected
+      AUTHENTICATE command, but before the connection was closed. Patch
+      by Marcus Griep. Bugfix on 0.2.0.x; fixes bugs 1015 and 1016.
+    - When we can't find an intro key for a v2 hidden service descriptor,
+      fall back to the v0 hidden service descriptor and log a bug message.
+      Workaround for bug 1024.
+    - Fix a log message that did not respect the SafeLogging option.
+      Resolves bug 1027.
+
+  o Minor features:
+    - If we're a relay and we change our IP address, be more verbose
+      about the reason that made us change. Should help track down
+      further bugs for relays on dynamic IP addresses.
+
+
+Changes in version 0.2.1.16-rc - 2009-06-20
+  Tor 0.2.1.16-rc speeds up performance for fast exit relays, and fixes
+  a bunch of minor bugs.
+
+  o Security fixes:
+    - Fix an edge case where a malicious exit relay could convince a
+      controller that the client's DNS question resolves to an internal IP
+      address. Bug found and fixed by "optimist"; bugfix on 0.1.2.8-beta.
+
+  o Major performance improvements (on 0.2.0.x):
+    - Disable and refactor some debugging checks that forced a linear scan
+      over the whole server-side DNS cache. These accounted for over 50%
+      of CPU time on a relatively busy exit node's gprof profile. Found
+      by Jacob.
+    - Disable some debugging checks that appeared in exit node profile
+      data.
+
+  o Minor features:
+    - Update to the "June 3 2009" ip-to-country file.
+    - Do not have tor-resolve automatically refuse all .onion addresses;
+      if AutomapHostsOnResolve is set in your torrc, this will work fine.
+
+  o Minor bugfixes (on 0.2.0.x):
+    - Log correct error messages for DNS-related network errors on
+      Windows.
+    - Fix a race condition that could cause crashes or memory corruption
+      when running as a server with a controller listening for log
+      messages.
+    - Avoid crashing when we have a policy specified in a DirPolicy or
+      SocksPolicy or ReachableAddresses option with ports set on it,
+      and we re-load the policy. May fix bug 996.
+    - Hidden service clients didn't use a cached service descriptor that
+      was older than 15 minutes, but wouldn't fetch a new one either,
+      because there was already one in the cache. Now, fetch a v2
+      descriptor unless the same descriptor was added to the cache within
+      the last 15 minutes. Fixes bug 997; reported by Marcus Griep.
+
+  o Minor bugfixes (on 0.2.1.x):
+    - Don't warn users about low port and hibernation mix when they
+      provide a *ListenAddress directive to fix that. Bugfix on
+      0.2.1.15-rc.
+    - When switching back and forth between bridge mode, do not start
+      gathering GeoIP data until two hours have passed.
+    - Do not complain that the user has requested an excluded node as
+      an exit when the node is not really an exit. This could happen
+      because the circuit was for testing, or an introduction point.
+      Fix for bug 984.
+
+
+Changes in version 0.2.1.15-rc - 2009-05-25
+  Tor 0.2.1.15-rc marks the second release candidate for the 0.2.1.x
+  series. It fixes a major bug on fast exit relays, as well as a variety
+  of more minor bugs.
+
+  o Major bugfixes (on 0.2.0.x):
+    - Fix a timing-dependent, allocator-dependent, DNS-related crash bug
+      that would occur on some exit nodes when DNS failures and timeouts
+      occurred in certain patterns. Fix for bug 957.
+
+  o Minor bugfixes (on 0.2.0.x):
+    - Actually return -1 in the error case for read_bandwidth_usage().
+      Harmless bug, since we currently don't care about the return value
+      anywhere. Bugfix on 0.2.0.9-alpha.
+    - Provide a more useful log message if bug 977 (related to buffer
+      freelists) ever reappears, and do not crash right away.
+    - Fix an assertion failure on 64-bit platforms when we allocated
+      memory right up to the end of a memarea, then realigned the memory
+      one step beyond the end. Fixes a possible cause of bug 930.
+    - Protect the count of open sockets with a mutex, so we can't
+      corrupt it when two threads are closing or opening sockets at once.
+      Fix for bug 939. Bugfix on 0.2.0.1-alpha.
+    - Don't allow a bridge to publish its router descriptor to a
+      non-bridge directory authority. Fixes part of bug 932.
+    - When we change to or from being a bridge, reset our counts of
+      client usage by country. Fixes bug 932.
+    - Fix a bug that made stream bandwidth get misreported to the
+      controller.
+    - Stop using malloc_usable_size() to use more area than we had
+      actually allocated: it was safe, but made valgrind really unhappy.
+    - Fix a memory leak when v3 directory authorities load their keys
+      and cert from disk. Bugfix on 0.2.0.1-alpha.
+
+  o Minor bugfixes (on 0.2.1.x):
+    - Fix use of freed memory when deciding to mark a non-addable
+      descriptor as never-downloadable. Bugfix on 0.2.1.9-alpha.
+
 
 Changes in version 0.2.1.14-rc - 2009-04-12
+  Tor 0.2.1.14-rc marks the first release candidate for the 0.2.1.x
+  series. It begins fixing some major performance problems, and also
+  finally addresses the bug that was causing relays on dynamic IP
+  addresses to fall out of the directory.
+
   o Major features:
     - Clients replace entry guards that were chosen more than a few months
       ago. This change should significantly improve client performance,

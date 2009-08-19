@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -20,8 +20,11 @@
 #ifndef INSTRUMENT_DOWNLOADS
 #define INSTRUMENT_DOWNLOADS 1
 #endif
-#ifndef ENABLE_GEOIP_STATS
-#define ENABLE_GEOIP_STATS 1
+#ifndef ENABLE_DIRREQ_STATS
+#define ENABLE_DIRREQ_STATS 1
+#endif
+#ifndef ENABLE_BUFFER_STATS
+#define ENABLE_BUFFER_STATS 1
 #endif
 #endif
 
@@ -91,8 +94,7 @@
 #include "util.h"
 #include "torgzip.h"
 #include "address.h"
-
-#include <event.h>
+#include "compat_libevent.h"
 
 /* These signals are defined to help control_signal_act work.
  */
@@ -136,7 +138,7 @@
 /** Maximum size, in bytes, for any directory object that we've downloaded. */
 #define MAX_DIR_DL_SIZE MAX_BUF_SIZE
 
-/** For http parsing: Maximum number of bytes we'll accept in the headers
+/** For HTTP parsing: Maximum number of bytes we'll accept in the headers
  * of an HTTP request or response. */
 #define MAX_HEADERS_SIZE 50000
 /** Maximum size, in bytes, for any directory object that we're accepting
@@ -263,7 +265,7 @@ typedef enum {
 #define _OR_CONN_STATE_MAX 8
 
 #define _EXIT_CONN_STATE_MIN 1
-/** State for an exit connection: waiting for response from dns farm. */
+/** State for an exit connection: waiting for response from DNS farm. */
 #define EXIT_CONN_STATE_RESOLVING 1
 /** State for an exit connection: waiting for connect() to finish. */
 #define EXIT_CONN_STATE_CONNECTING 2
@@ -483,11 +485,16 @@ typedef enum {
 #define CIRCUIT_PURPOSE_IS_ORIGIN(p) ((p)>_CIRCUIT_PURPOSE_OR_MAX)
 /** True iff the circuit purpose <b>p</b> is for a circuit that originated
  * here to serve as a client.  (Hidden services don't count here.) */
-#define CIRCUIT_PURPOSE_IS_CLIENT(p) \
+#define CIRCUIT_PURPOSE_IS_CLIENT(p)  \
   ((p)> _CIRCUIT_PURPOSE_OR_MAX &&    \
    (p)<=_CIRCUIT_PURPOSE_C_MAX)
 /** True iff the circuit_t <b>c</b> is actually an origin_circuit_t. */
 #define CIRCUIT_IS_ORIGIN(c) (CIRCUIT_PURPOSE_IS_ORIGIN((c)->purpose))
+/** True iff the circuit purpose <b>p</b> is for an established rendezvous
+ * circuit. */
+#define CIRCUIT_PURPOSE_IS_ESTABLISHED_REND(p) \
+  ((p) == CIRCUIT_PURPOSE_C_REND_JOINED ||     \
+   (p) == CIRCUIT_PURPOSE_S_REND_JOINED)
 
 /** How many circuits do we want simultaneously in-progress to handle
  * a given stream? */
@@ -730,12 +737,6 @@ typedef struct rend_data_t {
 
   /** Rendezvous cookie used by both, client and service. */
   char rend_cookie[REND_COOKIE_LEN];
-
-  /** Rendezvous descriptor version that is used by a service. Used to
-   * distinguish introduction and rendezvous points belonging to the same
-   * rendezvous service ID, but different descriptor versions.
-   */
-  uint8_t rend_desc_version;
 } rend_data_t;
 
 /** Time interval for tracking possible replays of INTRODUCE2 cells.
@@ -840,6 +841,9 @@ typedef struct var_cell_t {
 typedef struct packed_cell_t {
   struct packed_cell_t *next; /**< Next cell queued on this circuit. */
   char body[CELL_NETWORK_SIZE]; /**< Cell as packed for network. */
+#ifdef ENABLE_BUFFER_STATS
+  struct timeval packed_timeval; /**< When was this cell packed? */
+#endif
 } packed_cell_t;
 
 /** A queue of cells on a circuit, waiting to be added to the
@@ -928,8 +932,8 @@ typedef struct connection_t {
    * connection. */
   unsigned int linked_conn_is_closed:1;
 
-  int s; /**< Our socket; -1 if this connection is closed, or has no
-          * socket. */
+  /** Our socket; -1 if this connection is closed, or has no socket. */
+  evutil_socket_t s;
   int conn_array_index; /**< Index into the global connection array. */
   struct event *read_event; /**< Libevent event structure. */
   struct event *write_event; /**< Libevent event structure. */
@@ -943,7 +947,7 @@ typedef struct connection_t {
                                  * could write? */
   time_t timestamp_created; /**< When was this connection_t created? */
 
-  /* XXXX_IP6 make this ipv6-capable */
+  /* XXXX_IP6 make this IPv6-capable */
   int socket_family; /**< Address family of this connection's socket.  Usually
                       * AF_INET, but it can also be AF_UNIX, or in the future
                       * AF_INET6 */
@@ -971,6 +975,10 @@ typedef struct connection_t {
    * to the evdns_server_port is uses to listen to and answer connections. */
   struct evdns_server_port *dns_server_port;
 
+#ifdef ENABLE_DIRREQ_STATS
+  /** Unique ID for measuring tunneled network status requests. */
+  uint64_t dirreq_id;
+#endif
 } connection_t;
 
 /** Stores flags and information related to the portion of a v2 Tor OR
@@ -1093,7 +1101,7 @@ typedef struct edge_connection_t {
    * already retried several times. */
   uint8_t num_socks_retries;
 
-  /** True iff this connection is for a dns request only. */
+  /** True iff this connection is for a DNS request only. */
   unsigned int is_dns_request:1;
 
   /** True iff this stream must attach to a one-hop circuit (e.g. for
@@ -1146,7 +1154,7 @@ typedef struct dir_connection_t {
   /** If we're fetching descriptors, what router purpose shall we assign
    * to them? */
   uint8_t router_purpose;
-  /** List of fingerprints for networkstatuses or desriptors to be spooled. */
+  /** List of fingerprints for networkstatuses or descriptors to be spooled. */
   smartlist_t *fingerprint_stack;
   /** A cached_dir_t object that we're currently spooling out */
   struct cached_dir_t *cached_dir;
@@ -1169,12 +1177,6 @@ typedef struct control_connection_t {
 
   uint32_t event_mask; /**< Bitfield: which events does this controller
                         * care about? */
-  unsigned int use_long_names:1; /**< True if we should use long nicknames
-                                  * on this (v1) connection. Only settable
-                                  * via v1 controllers. */
-  /** For control connections only. If set, we send extended info with control
-   * events as appropriate. */
-  unsigned int use_extended_events:1;
 
   /** True if we have sent a protocolinfo reply on this connection. */
   unsigned int have_sent_protocolinfo:1;
@@ -1253,9 +1255,9 @@ typedef struct addr_policy_t {
 /** A cached_dir_t represents a cacheable directory object, along with its
  * compressed form. */
 typedef struct cached_dir_t {
-  char *dir; /**< Contents of this object, nul-terminated. */
+  char *dir; /**< Contents of this object, NUL-terminated. */
   char *dir_z; /**< Compressed contents of this object. */
-  size_t dir_len; /**< Length of <b>dir</b> (not counting its nul). */
+  size_t dir_len; /**< Length of <b>dir</b> (not counting its NUL). */
   size_t dir_z_len; /**< Length of <b>dir_z</b>. */
   time_t published; /**< When was this object published. */
   int refcnt; /**< Reference count for this cached_dir_t. */
@@ -1312,7 +1314,7 @@ typedef struct signed_descriptor_t {
    * necessarily NUL-terminated.  If saved_location is SAVED_IN_CACHE, this
    * pointer is null. */
   char *signed_descriptor_body;
-  /** Length of the annotations preceeding the server descriptor. */
+  /** Length of the annotations preceding the server descriptor. */
   size_t annotations_len;
   /** Length of the server descriptor. */
   size_t signed_descriptor_len;
@@ -1507,6 +1509,9 @@ typedef struct routerstatus_t {
 
   unsigned int has_bandwidth:1; /**< The vote/consensus had bw info */
   unsigned int has_exitsummary:1; /**< The vote/consensus had exit summaries */
+  unsigned int has_measured_bw:1; /**< The vote/consensus had a measured bw */
+
+  uint32_t measured_bw; /**< Measured bandwidth (capacity) of the router */
 
   uint32_t bandwidth; /**< Bandwidth (capacity) of the router as reported in
                        * the vote/consensus, in kilobytes/sec. */
@@ -1619,7 +1624,7 @@ typedef enum {
  * status consensus. */
 typedef struct networkstatus_t {
   networkstatus_type_t type; /**< Vote, consensus, or opinion? */
-  time_t published; /**< Vote only: Tiem when vote was written. */
+  time_t published; /**< Vote only: Time when vote was written. */
   time_t valid_after; /**< Time after which this vote or consensus applies. */
   time_t fresh_until; /**< Time before which this is the most recent vote or
                        * consensus. */
@@ -1634,7 +1639,7 @@ typedef struct networkstatus_t {
   /** How long does this vote/consensus claim that authorities take to
    * distribute their votes to one another? */
   int vote_seconds;
-  /** How long does this vote/consensus claim that authorites take to
+  /** How long does this vote/consensus claim that authorities take to
    * distribute their consensus signatures to one another? */
   int dist_seconds;
 
@@ -1915,7 +1920,7 @@ typedef struct circuit_t {
   /** The circuit_id used in the next (forward) hop of this circuit. */
   circid_t n_circ_id;
 
-  /** The hop to which we want to extend this ciruit.  Should be NULL if
+  /** The hop to which we want to extend this circuit.  Should be NULL if
    * the circuit has attached to a connection. */
   extend_info_t *n_hop;
 
@@ -1963,6 +1968,10 @@ typedef struct circuit_t {
    * linked to an OR connection. */
   struct circuit_t *prev_active_on_n_conn;
   struct circuit_t *next; /**< Next circuit in linked list of all circuits. */
+#ifdef ENABLE_DIRREQ_STATS
+  /** Unique ID for measuring tunneled network status requests. */
+  uint64_t dirreq_id;
+#endif
 } circuit_t;
 
 /** Largest number of relay_early cells that we can send on a given
@@ -2085,6 +2094,17 @@ typedef struct or_circuit_t {
 
   /** True iff this circuit was made with a CREATE_FAST cell. */
   unsigned int is_first_hop : 1;
+
+#ifdef ENABLE_BUFFER_STATS
+  /** Number of cells that were removed from circuit queue; reset every
+   * time when writing buffer stats to disk. */
+  uint32_t processed_cells;
+
+  /** Total time in milliseconds that cells spent in both app-ward and
+   * exit-ward queues of this circuit; reset every time when writing
+   * buffer stats to disk. */
+  uint64_t total_cell_waiting_time;
+#endif
 } or_circuit_t;
 
 /** Convert a circuit subtype to a circuit_t.*/
@@ -2180,7 +2200,7 @@ typedef struct {
   config_line_t *DirPolicy; /**< Lists of dir policy components */
   /** Addresses to bind for listening for SOCKS connections. */
   config_line_t *SocksListenAddress;
-  /** Addresses to bind for listening for transparent pf/nefilter
+  /** Addresses to bind for listening for transparent pf/netfilter
    * connections. */
   config_line_t *TransListenAddress;
   /** Addresses to bind for listening for transparent natd connections */
@@ -2428,6 +2448,8 @@ typedef struct {
                   * log whether it was DNS-leaking or not? */
   int HardwareAccel; /**< Boolean: Should we enable OpenSSL hardware
                       * acceleration where available? */
+  char *AccelName; /**< Optional hardware acceleration engine name. */
+  char *AccelDir; /**< Optional hardware acceleration engine search dir. */
   int UseEntryGuards; /**< Boolean: Do we try to enter from a smallish number
                        * of fixed nodes? */
   int NumEntryGuards; /**< How many entry guards do we try to establish? */
@@ -2437,6 +2459,9 @@ typedef struct {
   /** Should we always fetch our dir info on the mirror schedule (which
    * means directly from the authorities) no matter our other config? */
   int FetchDirInfoEarly;
+
+  /** Should we fetch our dir info at the start of the consensus period? */
+  int FetchDirInfoExtraEarly;
 
   char *VirtualAddrNetwork; /**< Address and mask to hand out for virtual
                              * MAPADDRESS requests. */
@@ -2459,7 +2484,7 @@ typedef struct {
   int ServerDNSAllowBrokenConfig;
 
   smartlist_t *ServerDNSTestAddresses; /**< A list of addresses that definitely
-                                        * should be resolveable. Used for
+                                        * should be resolvable. Used for
                                         * testing our DNS server. */
   int EnforceDistinctSubnets; /**< If true, don't allow multiple routers in the
                                * same network zone in the same circuit. */
@@ -2486,6 +2511,26 @@ typedef struct {
    * exit allows it, we use it. */
   int AllowSingleHopCircuits;
 
+  /** If true, we convert "www.google.com.foo.exit" addresses on the
+   * socks/trans/natd ports into "www.google.com" addresses that
+   * exit from the node "foo". Disabled by default since attacking
+   * websites and exit relays can use it to manipulate your path
+   * selection. */
+  int AllowDotExit;
+
+  /** If true, the user wants us to collect statistics on clients
+   * requesting network statuses from us as directory. */
+  int DirReqStatistics;
+
+  /** If true, the user wants us to collect statistics on port usage. */
+  int ExitPortStatistics;
+
+  /** If true, the user wants us to collect cell statistics. */
+  int CellStatistics;
+
+  /** If true, the user wants us to collect statistics as entry node. */
+  int EntryStatistics;
+
   /** If true, do not believe anybody who tells us that a domain resolves
    * to an internal address, or that an internal address has a PTR mapping.
    * Helps avoid some cross-site attacks. */
@@ -2503,6 +2548,9 @@ typedef struct {
   /** Should advertise and sign consensuses with a legacy key, for key
    * migration purposes? */
   int V3AuthUseLegacyKey;
+
+  /** Location of bandwidth measurement file */
+  char *V3BandwidthsFile;
 
   /** The length of time that we think an initial consensus should be fresh.
    * Only altered on testing networks. */
@@ -2540,8 +2588,8 @@ typedef struct {
    * the bridge authority guess which countries have blocked access to us. */
   int BridgeRecordUsageByCountry;
 
-#ifdef ENABLE_GEOIP_STATS
-  /** If true, and Tor is built with GEOIP_STATS support, and we're a
+#if 0
+  /** If true, and Tor is built with DIRREQ_STATS support, and we're a
    * directory, record how many directory requests we get from each country. */
   int DirRecordUsageByCountry;
   /** Round all GeoIP results to the next multiple of this value, to avoid
@@ -2566,7 +2614,7 @@ typedef struct {
 typedef struct {
   uint32_t _magic;
   /** The time at which we next plan to write the state to the disk.  Equal to
-   * TIME_MAX if there are no saveable changes, 0 if there are changes that
+   * TIME_MAX if there are no savable changes, 0 if there are changes that
    * should be saved right away. */
   time_t next_write;
 
@@ -2830,7 +2878,7 @@ void circuit_build_failed(origin_circuit_t *circ);
 #define CIRCLAUNCH_ONEHOP_TUNNEL  (1<<0)
 /** Flag to set when a circuit needs to be built of high-uptime nodes */
 #define CIRCLAUNCH_NEED_UPTIME    (1<<1)
-/** Flag to set when a circuit needs to be build of high-capcity nodes */
+/** Flag to set when a circuit needs to be built of high-capacity nodes */
 #define CIRCLAUNCH_NEED_CAPACITY  (1<<2)
 /** Flag to set when the last hop of a circuit doesn't need to be an
  * exit node. */
@@ -2917,6 +2965,10 @@ int options_need_geoip_info(or_options_t *options, const char **reason_out);
 int getinfo_helper_config(control_connection_t *conn,
                           const char *question, char **answer);
 
+const char *tor_get_digests(void);
+uint32_t get_effective_bwrate(or_options_t *options);
+uint32_t get_effective_bwburst(or_options_t *options);
+
 #ifdef CONFIG_PRIVATE
 /* Used only by config.c and test.c */
 or_options_t *options_new(void);
@@ -2934,7 +2986,6 @@ control_connection_t *control_connection_new(int socket_family);
 connection_t *connection_new(int type, int socket_family);
 
 void connection_link_connections(connection_t *conn_a, connection_t *conn_b);
-void connection_unregister_events(connection_t *conn);
 void connection_free(connection_t *conn);
 void connection_free_all(void);
 void connection_about_to_close_connection(connection_t *conn);
@@ -2991,8 +3042,7 @@ connection_t *connection_get_by_type_addr_port_purpose(int type,
                                                    uint16_t port, int purpose);
 connection_t *connection_get_by_type_state(int type, int state);
 connection_t *connection_get_by_type_state_rendquery(int type, int state,
-                                                     const char *rendquery,
-                                                     int rendversion);
+                                                     const char *rendquery);
 
 #define connection_speaks_cells(conn) ((conn)->type == CONN_TYPE_OR)
 int connection_is_listener(connection_t *conn);
@@ -3096,7 +3146,7 @@ int hostname_is_noconnect_address(const char *address);
 typedef enum hostname_type_t {
   NORMAL_HOSTNAME, ONION_HOSTNAME, EXIT_HOSTNAME, BAD_HOSTNAME
 } hostname_type_t;
-hostname_type_t parse_extended_hostname(char *address);
+hostname_type_t parse_extended_hostname(char *address, int allowdotexit);
 
 #if defined(HAVE_NET_IF_H) && defined(HAVE_NET_PFVAR_H)
 int get_pf_socket(void);
@@ -3225,6 +3275,7 @@ int control_event_stream_status(edge_connection_t *conn,
 int control_event_or_conn_status(or_connection_t *conn,
                                  or_conn_status_event_t e, int reason);
 int control_event_bandwidth_used(uint32_t n_read, uint32_t n_written);
+int control_event_stream_bandwidth(edge_connection_t *edge_conn);
 int control_event_stream_bandwidth_used(void);
 void control_event_logmsg(int severity, unsigned int domain, const char *msg);
 int control_event_descriptors_changed(smartlist_t *routers);
@@ -3399,8 +3450,8 @@ download_status_mark_impossible(download_status_t *dl)
  * Running Stable Unnamed V2Dir Valid\n". */
 #define MAX_FLAG_LINE_LEN 96
 /** Length of "w" line for weighting.  Currently at most
- * "w Bandwidth=<uint32t>\n" */
-#define MAX_WEIGHT_LINE_LEN (13+10)
+ * "w Bandwidth=<uint32t> Measured=<uint32t>\n" */
+#define MAX_WEIGHT_LINE_LEN (12+10+10+10+1)
 /** Maximum length of an exit policy summary line. */
 #define MAX_POLICY_LINE_LEN (3+MAX_EXITPOLICY_SUMMARY_LEN)
 /** Amount of space to allocate for each entry: r, s, and v lines. */
@@ -3432,8 +3483,6 @@ enum was_router_added_t dirserv_add_multiple_descriptors(
 enum was_router_added_t dirserv_add_descriptor(routerinfo_t *ri,
                                                const char **msg,
                                                const char *source);
-int getinfo_helper_dirserv_unregistered(control_connection_t *conn,
-                                        const char *question, char **answer);
 void dirserv_free_descriptors(void);
 void dirserv_set_router_is_running(routerinfo_t *router, time_t now);
 int list_server_status_v1(smartlist_t *routers, char **router_status_out,
@@ -3485,12 +3534,31 @@ int dirserv_remove_old_statuses(smartlist_t *fps, time_t cutoff);
 int dirserv_have_any_serverdesc(smartlist_t *fps, int spool_src);
 size_t dirserv_estimate_data_size(smartlist_t *fps, int is_serverdescs,
                                   int compressed);
+typedef enum {
+  NS_V2, NS_V3_CONSENSUS, NS_V3_VOTE, NS_CONTROL_PORT
+} routerstatus_format_type_t;
 int routerstatus_format_entry(char *buf, size_t buf_len,
                               routerstatus_t *rs, const char *platform,
-                              int first_line_only, int v2_format);
+                              routerstatus_format_type_t format);
 void dirserv_free_all(void);
 void cached_dir_decref(cached_dir_t *d);
 cached_dir_t *new_cached_dir(char *s, time_t published);
+
+#ifdef DIRSERV_PRIVATE
+typedef struct measured_bw_line_t {
+  char node_id[DIGEST_LEN];
+  char node_hex[MAX_HEX_NICKNAME_LEN+1];
+  long int bw;
+} measured_bw_line_t;
+
+int measured_bw_line_parse(measured_bw_line_t *out, const char *line);
+
+int measured_bw_line_apply(measured_bw_line_t *parsed_line,
+                           smartlist_t *routerstatuses);
+#endif
+
+int dirserv_read_measured_bandwidths(const char *from_file,
+                                     smartlist_t *routerstatuses);
 
 /********************************* dirvote.c ************************/
 
@@ -3577,6 +3645,7 @@ int dns_resolve(edge_connection_t *exitconn);
 void dns_launch_correctness_checks(void);
 int dns_seems_to_be_broken(void);
 void dns_reset_correctness_checks(void);
+void dump_dns_mem_usage(int severity);
 
 /********************************* dnsserv.c ************************/
 
@@ -3591,6 +3660,19 @@ void dnsserv_reject_request(edge_connection_t *conn);
 int dnsserv_launch_request(const char *name, int is_reverse);
 
 /********************************* geoip.c **************************/
+
+/** Round all GeoIP results to the next multiple of this value, to avoid
+ * leaking information. */
+#define DIR_RECORD_USAGE_GRANULARITY 8
+/** Time interval: Flush geoip data to disk this often. */
+#define DIR_RECORD_USAGE_RETAIN_IPS (24*60*60)
+/** How long do we have to have observed per-country request history before
+ * we are willing to talk about it? */
+#define DIR_RECORD_USAGE_MIN_OBSERVATION_TIME (24*60*60)
+
+/** Time interval: Flush geoip data to disk this often when measuring on an
+ * entry guard. */
+#define ENTRY_RECORD_USAGE_RETAIN_IPS (24*60*60)
 
 #ifdef GEOIP_PRIVATE
 int geoip_parse_entry(const char *line);
@@ -3607,7 +3689,7 @@ country_t geoip_get_country(const char *countrycode);
  * the others, we're not.
  */
 typedef enum {
-  /** We've noticed a connection as a bridge relay. */
+  /** We've noticed a connection as a bridge relay or entry guard. */
   GEOIP_CLIENT_CONNECT = 0,
   /** We've served a networkstatus consensus as a directory server. */
   GEOIP_CLIENT_NETWORKSTATUS = 1,
@@ -3617,13 +3699,66 @@ typedef enum {
 void geoip_note_client_seen(geoip_client_action_t action,
                             uint32_t addr, time_t now);
 void geoip_remove_old_clients(time_t cutoff);
+/** Indicates either a positive reply or a reason for rejectng a network
+ * status request that will be included in geoip statistics. */
+typedef enum {
+  /** Request is answered successfully. */
+  GEOIP_SUCCESS = 0,
+  /** V3 network status is not signed by a sufficient number of requested
+   * authorities. */
+  GEOIP_REJECT_NOT_ENOUGH_SIGS = 1,
+  /** Requested network status object is unavailable. */
+  GEOIP_REJECT_UNAVAILABLE = 2,
+  /** Requested network status not found. */
+  GEOIP_REJECT_NOT_FOUND = 3,
+  /** Network status has not been modified since If-Modified-Since time. */
+  GEOIP_REJECT_NOT_MODIFIED = 4,
+  /** Directory is busy. */
+  GEOIP_REJECT_BUSY = 5,
+} geoip_ns_response_t;
+#define GEOIP_NS_RESPONSE_NUM 6
+void geoip_note_ns_response(geoip_client_action_t action,
+                            geoip_ns_response_t response);
 time_t geoip_get_history_start(void);
 char *geoip_get_client_history(time_t now, geoip_client_action_t action);
 char *geoip_get_request_history(time_t now, geoip_client_action_t action);
 int getinfo_helper_geoip(control_connection_t *control_conn,
                          const char *question, char **answer);
 void geoip_free_all(void);
-void dump_geoip_stats(void);
+
+/** Directory requests that we are measuring can be either direct or
+ * tunneled. */
+typedef enum {
+  DIRREQ_DIRECT = 0,
+  DIRREQ_TUNNELED = 1,
+} dirreq_type_t;
+
+/** Possible states for either direct or tunneled directory requests that
+ * are relevant for determining network status download times. */
+typedef enum {
+  /** Found that the client requests a network status; applies to both
+   * direct and tunneled requests; initial state of a request that we are
+   * measuring. */
+  DIRREQ_IS_FOR_NETWORK_STATUS = 0,
+  /** Finished writing a network status to the directory connection;
+   * applies to both direct and tunneled requests; completes a direct
+   * request. */
+  DIRREQ_FLUSHING_DIR_CONN_FINISHED = 1,
+  /** END cell sent to circuit that initiated a tunneled request. */
+  DIRREQ_END_CELL_SENT = 2,
+  /** Flushed last cell from queue of the circuit that initiated a
+    * tunneled request to the outbuf of the OR connection. */
+  DIRREQ_CIRC_QUEUE_FLUSHED = 3,
+  /** Flushed last byte from buffer of the OR connection belonging to the
+    * circuit that initiated a tunneled request; completes a tunneled
+    * request. */
+  DIRREQ_OR_CONN_BUFFER_FLUSHED = 4
+} dirreq_state_t;
+
+void geoip_start_dirreq(uint64_t dirreq_id, size_t response_size,
+                        geoip_client_action_t action, dirreq_type_t type);
+void geoip_change_dirreq_state(uint64_t dirreq_id, dirreq_type_t type,
+                               dirreq_state_t new_state);
 
 /********************************* hibernate.c **********************/
 
@@ -3646,13 +3781,18 @@ extern int has_completed_circuit;
 
 int connection_add(connection_t *conn);
 int connection_remove(connection_t *conn);
+void connection_unregister_events(connection_t *conn);
 int connection_in_array(connection_t *conn);
 void add_connection_to_closeable_list(connection_t *conn);
 int connection_is_on_closeable_list(connection_t *conn);
 
 smartlist_t *get_connection_array(void);
 
-void connection_watch_events(connection_t *conn, short events);
+typedef enum watchable_events {
+  READ_EVENT=0x02,
+  WRITE_EVENT=0x04
+} watchable_events_t;
+void connection_watch_events(connection_t *conn, watchable_events_t events);
 int connection_is_reading(connection_t *conn);
 void connection_stop_reading(connection_t *conn);
 void connection_start_reading(connection_t *conn);
@@ -3733,6 +3873,8 @@ int router_set_networkstatus_v2(const char *s, time_t arrived_at,
                              v2_networkstatus_source_t source,
                              smartlist_t *requested_fingerprints);
 void networkstatus_v2_list_clean(time_t now);
+int compare_digest_to_routerstatus_entry(const void *_key,
+                                         const void **_member);
 routerstatus_t *networkstatus_v2_find_entry(networkstatus_v2_t *ns,
                                          const char *digest);
 routerstatus_t *networkstatus_vote_find_entry(networkstatus_t *ns,
@@ -3828,7 +3970,7 @@ void clear_pending_onions(void);
 /********************************* policies.c ************************/
 
 /* (length of "accept 255.255.255.255/255.255.255.255:65535-65535\n" plus a
- * nul.)
+ * NUL.)
  */
 #define POLICY_BUF_LEN 52
 
@@ -3957,6 +4099,17 @@ void rep_hist_note_extend_failed(const char *from_name, const char *to_name);
 void rep_hist_dump_stats(time_t now, int severity);
 void rep_hist_note_bytes_read(size_t num_bytes, time_t when);
 void rep_hist_note_bytes_written(size_t num_bytes, time_t when);
+#ifdef ENABLE_EXIT_STATS
+void rep_hist_note_exit_bytes_read(uint16_t port, size_t num_bytes,
+                                   time_t now);
+void rep_hist_note_exit_bytes_written(uint16_t port, size_t num_bytes,
+                                      time_t now);
+void rep_hist_note_exit_stream_opened(uint16_t port, time_t now);
+#else
+#define rep_hist_note_exit_bytes_read(p,n,t) STMT_NIL
+#define rep_hist_note_exit_bytes_written(p,n,t) STMT_NIL
+#define rep_hist_note_exit_stream_opened(p,t) STMT_NIL
+#endif
 int rep_hist_bandwidth_assess(void);
 char *rep_hist_get_bandwidth_lines(int for_extrainfo);
 void rep_hist_update_state(or_state_t *state);
@@ -3965,7 +4118,7 @@ void rep_history_clean(time_t before);
 
 void rep_hist_note_router_reachable(const char *id, time_t when);
 void rep_hist_note_router_unreachable(const char *id, time_t when);
-int rep_hist_record_mtbf_data(void);
+int rep_hist_record_mtbf_data(time_t now, int missing_means_down);
 int rep_hist_load_mtbf_data(time_t now);
 
 time_t rep_hist_downrate_old_runs(time_t now);
@@ -4008,13 +4161,18 @@ void hs_usage_note_fetch_successful(const char *service_id, time_t now);
 void hs_usage_write_statistics_to_file(time_t now);
 void hs_usage_free_all(void);
 
+#ifdef ENABLE_BUFFER_STATS
+#define DUMP_BUFFER_STATS_INTERVAL (24*60*60)
+void add_circ_to_buffer_stats(circuit_t *circ, time_t end_of_interval);
+void dump_buffer_stats(void);
+#endif
+
 /********************************* rendclient.c ***************************/
 
 void rend_client_introcirc_has_opened(origin_circuit_t *circ);
 void rend_client_rendcirc_has_opened(origin_circuit_t *circ);
 int rend_client_introduction_acked(origin_circuit_t *circ, const char *request,
                                    size_t request_len);
-void rend_client_refetch_renddesc(const char *query);
 void rend_client_refetch_v2_renddesc(const rend_data_t *rend_query);
 int rend_client_remove_intro_point(extend_info_t *failed_intro,
                                    const rend_data_t *rend_query);
@@ -4022,7 +4180,7 @@ int rend_client_rendezvous_acked(origin_circuit_t *circ, const char *request,
                                  size_t request_len);
 int rend_client_receive_rendezvous(origin_circuit_t *circ, const char *request,
                                    size_t request_len);
-void rend_client_desc_trynow(const char *query, int rend_version);
+void rend_client_desc_trynow(const char *query);
 
 extend_info_t *rend_client_get_random_intro(const rend_data_t *rend_query);
 
@@ -4089,10 +4247,6 @@ void rend_process_relay_cell(circuit_t *circ, const crypt_path_t *layer_hint,
                              int command, size_t length, const char *payload);
 
 void rend_service_descriptor_free(rend_service_descriptor_t *desc);
-int rend_encode_service_descriptor(rend_service_descriptor_t *desc,
-                                   crypto_pk_env_t *key,
-                                   char **str_out,
-                                   size_t *len_out);
 rend_service_descriptor_t *rend_parse_service_descriptor(const char *str,
                                                          size_t len);
 int rend_get_service_id(crypto_pk_env_t *pk, char *out);
@@ -4406,7 +4560,8 @@ void routerinfo_free(routerinfo_t *router);
 void extrainfo_free(extrainfo_t *extrainfo);
 void routerlist_free(routerlist_t *rl);
 void dump_routerlist_mem_usage(int severity);
-void routerlist_remove(routerlist_t *rl, routerinfo_t *ri, int make_old);
+void routerlist_remove(routerlist_t *rl, routerinfo_t *ri, int make_old,
+                       time_t now);
 void routerlist_free_all(void);
 void routerlist_reset_warnings(void);
 void router_set_status(const char *digest, int up);
@@ -4503,7 +4658,8 @@ int routerset_needs_geoip(const routerset_t *set);
 int routerset_contains_router(const routerset_t *set, routerinfo_t *ri);
 int routerset_contains_routerstatus(const routerset_t *set,
                                     routerstatus_t *rs);
-int routerset_contains_extendinfo(const routerset_t *set, extend_info_t *ei);
+int routerset_contains_extendinfo(const routerset_t *set,
+                                  const extend_info_t *ei);
 void routerset_get_all_routers(smartlist_t *out, const routerset_t *routerset,
                                int running_only);
 void routersets_get_disjunction(smartlist_t *target, const smartlist_t *source,
@@ -4583,6 +4739,7 @@ void sort_version_list(smartlist_t *lst, int remove_duplicates);
 void assert_addr_policy_ok(smartlist_t *t);
 void dump_distinct_digest_count(int severity);
 
+int compare_routerstatus_entries(const void **_a, const void **_b);
 networkstatus_v2_t *networkstatus_v2_parse_from_string(const char *s);
 networkstatus_t *networkstatus_parse_vote_from_string(const char *s,
                                                  const char **eos_out,

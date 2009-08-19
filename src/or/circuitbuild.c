@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -1436,17 +1436,67 @@ choose_good_exit_server(uint8_t purpose, routerlist_t *dir,
 /** Log a warning if the user specified an exit for the circuit that
  * has been excluded from use by ExcludeNodes or ExcludeExitNodes. */
 static void
-warn_if_router_excluded(const extend_info_t *exit)
+warn_if_last_router_excluded(uint8_t purpose, const extend_info_t *exit)
 {
   or_options_t *options = get_options();
-  routerinfo_t *ri = router_get_by_digest(exit->identity_digest);
+  routerset_t *rs = options->ExcludeNodes;
+  const char *description;
+  int severity;
+  int domain = LD_CIRC;
 
-  if (!ri || !options->_ExcludeExitNodesUnion)
-    return;
+  switch (purpose)
+    {
+    default:
+    case CIRCUIT_PURPOSE_OR:
+    case CIRCUIT_PURPOSE_INTRO_POINT:
+    case CIRCUIT_PURPOSE_REND_POINT_WAITING:
+    case CIRCUIT_PURPOSE_REND_ESTABLISHED:
+      log_warn(LD_BUG, "Called on non-origin circuit (purpose %d)",
+               (int)purpose);
+      return;
+    case CIRCUIT_PURPOSE_C_GENERAL:
+      description = "Requested exit node";
+      rs = options->_ExcludeExitNodesUnion;
+      severity = LOG_WARN;
+      break;
+    case CIRCUIT_PURPOSE_C_INTRODUCING:
+    case CIRCUIT_PURPOSE_C_INTRODUCE_ACK_WAIT:
+    case CIRCUIT_PURPOSE_C_INTRODUCE_ACKED:
+      description = "Introduction point for hidden service";
+      severity = LOG_INFO;
+      break;
+    case CIRCUIT_PURPOSE_C_ESTABLISH_REND:
+    case CIRCUIT_PURPOSE_C_REND_READY:
+    case CIRCUIT_PURPOSE_C_REND_READY_INTRO_ACKED:
+    case CIRCUIT_PURPOSE_C_REND_JOINED:
+      description = "Chosen rendezvous point";
+      severity = LOG_WARN;
+      domain = LD_BUG;
+      break;
+    case CIRCUIT_PURPOSE_S_ESTABLISH_INTRO:
+      description = "Chosen introduction point";
+      severity = LOG_INFO;
+      break;
+    case CIRCUIT_PURPOSE_S_CONNECT_REND:
+    case CIRCUIT_PURPOSE_S_REND_JOINED:
+      description = "Client-selected rendezvous point";
+      severity = LOG_INFO;
+      break;
+    case CIRCUIT_PURPOSE_TESTING:
+      description = "Target for testing circuit";
+      severity = LOG_INFO;
+      break;
+    case CIRCUIT_PURPOSE_CONTROLLER:
+      rs = options->_ExcludeExitNodesUnion;
+      description = "Controller-selected circuit target";
+      severity = LOG_WARN;
+      break;
+    }
 
-  if (routerset_contains_router(options->_ExcludeExitNodesUnion, ri))
-    log_warn(LD_CIRC,"Requested exit node '%s' is in ExcludeNodes, "
-             "or ExcludeExitNodes, using anyway.",exit->nickname);
+  if (routerset_contains_extendinfo(rs, exit))
+    log_fn(severity, domain, "%s '%s' is in ExcludeNodes%s.  Using anyway.",
+           description,exit->nickname,
+           rs==options->ExcludeNodes?"":" or ExcludeExitNodes.");
 
   return;
 }
@@ -1471,7 +1521,7 @@ onion_pick_cpath_exit(origin_circuit_t *circ, extend_info_t *exit)
   }
 
   if (exit) { /* the circuit-builder pre-requested one */
-    warn_if_router_excluded(exit);
+    warn_if_last_router_excluded(circ->_base.purpose, exit);
     log_info(LD_CIRC,"Using requested exit node '%s'", exit->nickname);
     exit = extend_info_dup(exit);
   } else { /* we have to decide one */
@@ -1938,7 +1988,7 @@ entry_is_time_to_retry(entry_guard_t *e, time_t now)
  * right now. (Else return NULL.) In particular, it must be
  * - Listed as either up or never yet contacted;
  * - Present in the routerlist;
- * - Listed as 'stable' or 'fast' by the current dirserver concensus,
+ * - Listed as 'stable' or 'fast' by the current dirserver consensus,
  *   if demanded by <b>need_uptime</b> or <b>need_capacity</b>;
  *   (This check is currently redundant with the Guard flag, but in
  *   the future that might change. Best to leave it in for now.)
@@ -2025,7 +2075,7 @@ log_entry_guards(int severity)
 
 /** Called when one or more guards that we would previously have used for some
  * purpose are no longer in use because a higher-priority guard has become
- * useable again. */
+ * usable again. */
 static void
 control_event_guard_deferred(void)
 {
@@ -2849,8 +2899,7 @@ int
 getinfo_helper_entry_guards(control_connection_t *conn,
                             const char *question, char **answer)
 {
-  int use_long_names = conn->use_long_names;
-
+  (void) conn;
   if (!strcmp(question,"entry-guards") ||
       !strcmp(question,"helper-nodes")) {
     smartlist_t *sl = smartlist_create();
@@ -2858,12 +2907,13 @@ getinfo_helper_entry_guards(control_connection_t *conn,
     char nbuf[MAX_VERBOSE_NICKNAME_LEN+1];
     if (!entry_guards)
       entry_guards = smartlist_create();
-    SMARTLIST_FOREACH(entry_guards, entry_guard_t *, e,
-      {
+    SMARTLIST_FOREACH_BEGIN(entry_guards, entry_guard_t *, e) {
         size_t len = MAX_VERBOSE_NICKNAME_LEN+ISO_TIME_LEN+32;
         char *c = tor_malloc(len);
         const char *status = NULL;
         time_t when = 0;
+        routerinfo_t *ri;
+
         if (!e->made_contact) {
           status = "never-connected";
         } else if (e->bad_since) {
@@ -2872,19 +2922,17 @@ getinfo_helper_entry_guards(control_connection_t *conn,
         } else {
           status = "up";
         }
-        if (use_long_names) {
-          routerinfo_t *ri = router_get_by_digest(e->identity);
-          if (ri) {
-            router_get_verbose_nickname(nbuf, ri);
-          } else {
-            nbuf[0] = '$';
-            base16_encode(nbuf+1, sizeof(nbuf)-1, e->identity, DIGEST_LEN);
-            /* e->nickname field is not very reliable if we don't know about
-             * this router any longer; don't include it. */
-          }
+
+        ri = router_get_by_digest(e->identity);
+        if (ri) {
+          router_get_verbose_nickname(nbuf, ri);
         } else {
-          base16_encode(nbuf, sizeof(nbuf), e->identity, DIGEST_LEN);
+          nbuf[0] = '$';
+          base16_encode(nbuf+1, sizeof(nbuf)-1, e->identity, DIGEST_LEN);
+          /* e->nickname field is not very reliable if we don't know about
+           * this router any longer; don't include it. */
         }
+
         if (when) {
           format_iso_time(tbuf, when);
           tor_snprintf(c, len, "%s %s %s\n", nbuf, status, tbuf);
@@ -2892,7 +2940,7 @@ getinfo_helper_entry_guards(control_connection_t *conn,
           tor_snprintf(c, len, "%s %s\n", nbuf, status);
         }
         smartlist_add(sl, c);
-      });
+    } SMARTLIST_FOREACH_END(e);
     *answer = smartlist_join_strings(sl, "", 0, NULL);
     SMARTLIST_FOREACH(sl, char *, c, tor_free(c));
     smartlist_free(sl);

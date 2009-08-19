@@ -1,7 +1,7 @@
 /* Copyright (c) 2001, Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -53,7 +53,7 @@
 
 /** Catch-all for miscellaneous events and fatal errors. */
 #define LD_GENERAL  (1u<<0)
-/** The cryptography subsytem. */
+/** The cryptography subsystem. */
 #define LD_CRYPTO   (1u<<1)
 /** Networking. */
 #define LD_NET      (1u<<2)
@@ -134,8 +134,6 @@ void add_temp_log(int min_severity);
 void close_temp_logs(void);
 void rollback_log_changes(void);
 void mark_logs_temp(void);
-void configure_libevent_logging(void);
-void suppress_libevent_log_msg(const char *msg);
 void change_callback_log_severity(int loglevelMin, int loglevelMax,
                                   log_callback cb);
 void log_set_application_name(const char *name);

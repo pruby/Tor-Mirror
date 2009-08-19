@@ -1,7 +1,7 @@
 /* Copyright 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -447,6 +447,11 @@ circuit_free(circuit_t *circ)
       rend_data_free(ocirc->rend_data);
   } else {
     or_circuit_t *ocirc = TO_OR_CIRCUIT(circ);
+#ifdef ENABLE_BUFFER_STATS
+    /* Remember cell statistics for this circuit before deallocating. */
+    if (get_options()->CellStatistics)
+      add_circ_to_buffer_stats(circ, time(NULL));
+#endif
     mem = ocirc;
     memlen = sizeof(or_circuit_t);
     tor_assert(circ->magic == OR_CIRCUIT_MAGIC);

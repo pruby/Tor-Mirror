@@ -1,13 +1,13 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
  * \file relay.c
  * \brief Handle relay cell encryption/decryption, plus packaging and
- *    receiving from circuits, plus queueing on circuits.
+ *    receiving from circuits, plus queuing on circuits.
  **/
 
 #include "or.h"
@@ -208,6 +208,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
       tor_assert(circ->purpose == CIRCUIT_PURPOSE_REND_ESTABLISHED);
       tor_assert(splice->_base.purpose == CIRCUIT_PURPOSE_REND_ESTABLISHED);
       cell->circ_id = splice->p_circ_id;
+      cell->command = CELL_RELAY; /* can't be relay_early anyway */
       if ((reason = circuit_receive_relay_cell(cell, TO_CIRCUIT(splice),
                                                CELL_DIRECTION_IN)) < 0) {
         log_warn(LD_REND, "Error relaying cell across rendezvous; closing "
@@ -532,6 +533,14 @@ relay_send_command_from_edge(uint16_t stream_id, circuit_t *circ,
   log_debug(LD_OR,"delivering %d cell %s.", relay_command,
             cell_direction == CELL_DIRECTION_OUT ? "forward" : "backward");
 
+#ifdef ENABLE_DIRREQ_STATS
+  /* If we are sending an END cell and this circuit is used for a tunneled
+   * directory request, advance its state. */
+  if (relay_command == RELAY_COMMAND_END && circ->dirreq_id)
+    geoip_change_dirreq_state(circ->dirreq_id, DIRREQ_TUNNELED,
+                              DIRREQ_END_CELL_SENT);
+#endif
+
   if (cell_direction == CELL_DIRECTION_OUT && circ->n_conn) {
     /* if we're using relaybandwidthrate, this conn wants priority */
     circ->n_conn->client_used = approx_time();
@@ -541,11 +550,17 @@ relay_send_command_from_edge(uint16_t stream_id, circuit_t *circ,
     origin_circuit_t *origin_circ = TO_ORIGIN_CIRCUIT(circ);
     if (origin_circ->remaining_relay_early_cells > 0 &&
         (relay_command == RELAY_COMMAND_EXTEND ||
-         cpath_layer != origin_circ->cpath)) {
-      /* If we've got any relay_early cells left, and we're sending a relay
-       * cell or we're not talking to the first hop, use one of them.  Don't
-       * worry about the conn protocol version: append_cell_to_circuit_queue
-       * will fix it up. */
+         (cpath_layer != origin_circ->cpath &&
+          !CIRCUIT_PURPOSE_IS_ESTABLISHED_REND(circ->purpose)))) {
+      /* If we've got any relay_early cells left, and we're sending
+       * an extend cell or (we're not talking to the first hop and we're
+       * not talking to a rendezvous circuit), use one of them.
+       * Don't worry about the conn protocol version:
+       * append_cell_to_circuit_queue will fix it up. */
+      /* XXX For now, clients don't use RELAY_EARLY cells when sending
+       * relay cells on rendezvous circuits. See bug 1038. Eventually,
+       * we can take this behavior away in favor of having clients avoid
+       * rendezvous points running 0.2.1.3-alpha through 0.2.1.18. -RD */
       cell.command = CELL_RELAY_EARLY;
       --origin_circ->remaining_relay_early_cells;
       log_debug(LD_OR, "Sending a RELAY_EARLY cell; %d remaining.",
@@ -783,7 +798,7 @@ connection_ap_process_end_not_open(
            "Edge got end (%s) before we're connected. Marking for close.",
        stream_end_reason_to_string(rh->length > 0 ? reason : -1));
   circuit_log_path(LOG_INFO,LD_APP,circ);
-  /* need to test because of detach_retriable*/
+  /* need to test because of detach_retriable */
   if (!conn->_base.marked_for_close)
     connection_mark_unattached_ap(conn, control_reason);
   return 0;
@@ -925,7 +940,7 @@ connection_edge_process_relay_cell_not_open(
                                   2+answer_len));
     else
       ttl = -1;
-    if (answer_type == RESOLVED_TYPE_IPV4 && answer_len >= 4) {
+    if (answer_type == RESOLVED_TYPE_IPV4 && answer_len == 4) {
       uint32_t addr = ntohl(get_uint32(cell->payload+RELAY_HEADER_SIZE+2));
       if (get_options()->ClientDNSRejectInternalAddresses &&
           is_internal_IP(addr, 0)) {
@@ -947,7 +962,7 @@ connection_edge_process_relay_cell_not_open(
                    cell->payload+RELAY_HEADER_SIZE+2, /*answer*/
                    ttl,
                    -1);
-    if (answer_type == RESOLVED_TYPE_IPV4) {
+    if (answer_type == RESOLVED_TYPE_IPV4 && answer_len == 4) {
       uint32_t addr = ntohl(get_uint32(cell->payload+RELAY_HEADER_SIZE+2));
       remap_event_helper(conn, addr);
     }
@@ -992,7 +1007,8 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
   relay_header_unpack(&rh, cell->payload);
 //  log_fn(LOG_DEBUG,"command %d stream %d", rh.command, rh.stream_id);
   num_seen++;
-  log_debug(domain, "Now seen %d relay cells here.", num_seen);
+  log_debug(domain, "Now seen %d relay cells here (command %d, stream %d).",
+            num_seen, rh.command, rh.stream_id);
 
   if (rh.length > RELAY_PAYLOAD_SIZE) {
     log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
@@ -1031,6 +1047,18 @@ connection_edge_process_relay_cell(cell_t *cell, circuit_t *circ,
                "Begin cell for known stream. Dropping.");
         return 0;
       }
+#ifdef ENABLE_DIRREQ_STATS
+      if (rh.command == RELAY_COMMAND_BEGIN_DIR) {
+        /* Assign this circuit and its app-ward OR connection a unique ID,
+         * so that we can measure download times. The local edge and dir
+         * connection will be assigned the same ID when they are created
+         * and linked. */
+        static uint64_t next_id = 0;
+        circ->dirreq_id = ++next_id;
+        TO_CONN(TO_OR_CIRCUIT(circ)->p_conn)->dirreq_id = circ->dirreq_id;
+      }
+#endif
+
       return connection_exit_begin_conn(cell, circ);
     case RELAY_COMMAND_DATA:
       ++stats_n_data_cells_received;
@@ -1351,9 +1379,9 @@ connection_edge_consider_sending_sendme(edge_connection_t *conn)
     return;
   }
 
-  while (conn->deliver_window < STREAMWINDOW_START - STREAMWINDOW_INCREMENT) {
+  while (conn->deliver_window <= STREAMWINDOW_START - STREAMWINDOW_INCREMENT) {
     log_debug(conn->cpath_layer?LD_APP:LD_EXIT,
-              "Outbuf %d, Queueing stream sendme.",
+              "Outbuf %d, Queuing stream sendme.",
               (int)conn->_base.outbuf_flushlen);
     conn->deliver_window += STREAMWINDOW_INCREMENT;
     if (connection_edge_send_command(conn, RELAY_COMMAND_SENDME,
@@ -1465,9 +1493,9 @@ circuit_consider_sending_sendme(circuit_t *circ, crypt_path_t *layer_hint)
 {
 //  log_fn(LOG_INFO,"Considering: layer_hint is %s",
 //         layer_hint ? "defined" : "null");
-  while ((layer_hint ? layer_hint->deliver_window : circ->deliver_window) <
+  while ((layer_hint ? layer_hint->deliver_window : circ->deliver_window) <=
           CIRCWINDOW_START - CIRCWINDOW_INCREMENT) {
-    log_debug(LD_CIRC,"Queueing circuit sendme.");
+    log_debug(LD_CIRC,"Queuing circuit sendme.");
     if (layer_hint)
       layer_hint->deliver_window += CIRCWINDOW_INCREMENT;
     else
@@ -1592,7 +1620,13 @@ cell_queue_append(cell_queue_t *queue, packed_cell_t *cell)
 void
 cell_queue_append_packed_copy(cell_queue_t *queue, const cell_t *cell)
 {
-  cell_queue_append(queue, packed_cell_copy(cell));
+  packed_cell_t *copy = packed_cell_copy(cell);
+#ifdef ENABLE_BUFFER_STATS
+  /* Remember the exact time when this cell was put in the queue. */
+  if (get_options()->CellStatistics)
+    tor_gettimeofday(&copy->packed_timeval);
+#endif
+  cell_queue_append(queue, copy);
 }
 
 /** Remove and free every cell in <b>queue</b>. */
@@ -1660,7 +1694,7 @@ prev_circ_on_conn_p(circuit_t *circ, or_connection_t *conn)
 }
 
 /** Add <b>circ</b> to the list of circuits with pending cells on
- * <b>conn</b>.  No effect if <b>circ</b> is already unlinked. */
+ * <b>conn</b>.  No effect if <b>circ</b> is already linked. */
 void
 make_circuit_active_on_conn(circuit_t *circ, or_connection_t *conn)
 {
@@ -1686,7 +1720,7 @@ make_circuit_active_on_conn(circuit_t *circ, or_connection_t *conn)
   assert_active_circuits_ok_paranoid(conn);
 }
 
-/** Remove <b>circ</b> to the list of circuits with pending cells on
+/** Remove <b>circ</b> from the list of circuits with pending cells on
  * <b>conn</b>.  No effect if <b>circ</b> is already unlinked. */
 void
 make_circuit_inactive_on_conn(circuit_t *circ, or_connection_t *conn)
@@ -1800,6 +1834,29 @@ connection_or_flush_from_first_active_circuit(or_connection_t *conn, int max,
   for (n_flushed = 0; n_flushed < max && queue->head; ) {
     packed_cell_t *cell = cell_queue_pop(queue);
     tor_assert(*next_circ_on_conn_p(circ,conn));
+
+#ifdef ENABLE_BUFFER_STATS
+    /* Calculate the exact time that this cell has spent in the queue. */
+    if (get_options()->CellStatistics && !CIRCUIT_IS_ORIGIN(circ)) {
+      struct timeval flushed_from_queue;
+      uint32_t cell_waiting_time;
+      or_circuit_t *orcirc = TO_OR_CIRCUIT(circ);
+      tor_gettimeofday(&flushed_from_queue);
+      cell_waiting_time = (uint32_t)
+            tv_mdiff(&cell->packed_timeval, &flushed_from_queue);
+
+      orcirc->total_cell_waiting_time += cell_waiting_time;
+      orcirc->processed_cells++;
+    }
+#endif
+#ifdef ENABLE_DIRREQ_STATS
+    /* If we just flushed our queue and this circuit is used for a
+     * tunneled directory request, possibly advance its state. */
+    if (queue->n == 0 && TO_CONN(conn)->dirreq_id)
+      geoip_change_dirreq_state(TO_CONN(conn)->dirreq_id,
+                                DIRREQ_TUNNELED,
+                                DIRREQ_CIRC_QUEUE_FLUSHED);
+#endif
 
     connection_write_to_buf(cell->body, CELL_NETWORK_SIZE, TO_CONN(conn));
 

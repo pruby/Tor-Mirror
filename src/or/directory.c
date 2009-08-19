@@ -1,6 +1,6 @@
 /* Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #include "or.h"
@@ -794,7 +794,7 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
                                payload, payload_len,
                                supports_conditional_consensus,
                                if_modified_since);
-        connection_watch_events(TO_CONN(conn), EV_READ | EV_WRITE);
+        connection_watch_events(TO_CONN(conn), READ_EVENT | WRITE_EVENT);
         /* writable indicates finish, readable indicates broken link,
            error indicates broken link in windowsland. */
     }
@@ -833,7 +833,7 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
                            payload, payload_len,
                            supports_conditional_consensus,
                            if_modified_since);
-    connection_watch_events(TO_CONN(conn), EV_READ | EV_WRITE);
+    connection_watch_events(TO_CONN(conn), READ_EVENT|WRITE_EVENT);
     connection_start_reading(TO_CONN(linked_conn));
   }
 }
@@ -881,7 +881,7 @@ directory_get_consensus_url(int supports_conditional_consensus)
 
   if (supports_conditional_consensus) {
     char *authority_id_list;
-    smartlist_t *authority_digets = smartlist_create();
+    smartlist_t *authority_digests = smartlist_create();
 
     SMARTLIST_FOREACH(router_get_trusted_dir_servers(),
                       trusted_dir_server_t *, ds,
@@ -893,10 +893,10 @@ directory_get_consensus_url(int supports_conditional_consensus)
         hex = tor_malloc(2*CONDITIONAL_CONSENSUS_FPR_LEN+1);
         base16_encode(hex, 2*CONDITIONAL_CONSENSUS_FPR_LEN+1,
                       ds->v3_identity_digest, CONDITIONAL_CONSENSUS_FPR_LEN);
-        smartlist_add(authority_digets, hex);
+        smartlist_add(authority_digests, hex);
       });
-    smartlist_sort(authority_digets, _compare_strs);
-    authority_id_list = smartlist_join_strings(authority_digets,
+    smartlist_sort(authority_digests, _compare_strs);
+    authority_id_list = smartlist_join_strings(authority_digests,
                                                "+", 0, NULL);
 
     len = strlen(authority_id_list)+64;
@@ -904,8 +904,8 @@ directory_get_consensus_url(int supports_conditional_consensus)
     tor_snprintf(url, len, "/tor/status-vote/current/consensus/%s.z",
                  authority_id_list);
 
-    SMARTLIST_FOREACH(authority_digets, char *, cp, tor_free(cp));
-    smartlist_free(authority_digets);
+    SMARTLIST_FOREACH(authority_digests, char *, cp, tor_free(cp));
+    smartlist_free(authority_digests);
     tor_free(authority_id_list);
   } else {
     url = tor_strdup("/tor/status-vote/current/consensus.z");
@@ -1050,31 +1050,10 @@ directory_send_command(dir_connection_t *conn,
       httpcommand = "POST";
       url = tor_strdup("/tor/post/consensus-signature");
       break;
-    case DIR_PURPOSE_FETCH_RENDDESC:
-      tor_assert(resource);
-      tor_assert(!payload);
-
-      /* this must be true or we wouldn't be doing the lookup */
-      tor_assert(strlen(resource) <= REND_SERVICE_ID_LEN_BASE32);
-      /* This breaks the function abstraction. */
-      conn->rend_data = tor_malloc_zero(sizeof(rend_data_t));
-      strlcpy(conn->rend_data->onion_address, resource,
-              sizeof(conn->rend_data->onion_address));
-      conn->rend_data->rend_desc_version = 0;
-
-      httpcommand = "GET";
-      /* Request the most recent versioned descriptor. */
-      // (XXXX We were going to switch this to fetch rendezvous1 descriptors,
-      // but that never got testing, and it wasn't a good design.)
-      len = strlen(resource)+32;
-      url = tor_malloc(len);
-      tor_snprintf(url, len, "/tor/rendezvous/%s", resource);
-      break;
     case DIR_PURPOSE_FETCH_RENDDESC_V2:
       tor_assert(resource);
       tor_assert(strlen(resource) <= REND_DESC_ID_V2_LEN_BASE32);
       tor_assert(!payload);
-      conn->rend_data->rend_desc_version = 2;
       httpcommand = "GET";
       len = strlen(resource) + 32;
       url = tor_malloc(len);
@@ -1920,7 +1899,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
           /* Success, or at least there's a v2 descriptor already
            * present. Notify pending connections about this. */
           conn->_base.purpose = DIR_PURPOSE_HAS_FETCHED_RENDDESC;
-          rend_client_desc_trynow(conn->rend_data->onion_address, -1);
+          rend_client_desc_trynow(conn->rend_data->onion_address);
         }
         break;
       case 404:
@@ -1967,7 +1946,7 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
             log_info(LD_REND, "Successfully fetched v2 rendezvous "
                      "descriptor.");
             conn->_base.purpose = DIR_PURPOSE_HAS_FETCHED_RENDDESC;
-            rend_client_desc_trynow(conn->rend_data->onion_address, -1);
+            rend_client_desc_trynow(conn->rend_data->onion_address);
             break;
         }
         break;
@@ -2428,13 +2407,9 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       dlen = strlen(frontpage);
       /* Let's return a disclaimer page (users shouldn't use V1 anymore,
          and caches don't fetch '/', so this is safe). */
-      if (global_write_bucket_low(TO_CONN(conn), dlen, 1)) {
-        log_info(LD_DIRSERV,
-                 "Client asked for DirPortFrontPage content, but we've been "
-                 "writing too many bytes lately. Sending 503 Dir busy.");
-        write_http_status_line(conn, 503, "Directory busy, try again later");
-        goto done;
-      }
+
+      /* [We don't check for write_bucket_low here, since we want to serve
+       *  this page no matter what.] */
       note_request(url, dlen);
       write_http_response_header_impl(conn, dlen, "text/html", "identity",
                                       NULL, DIRPORTFRONTPAGE_CACHE_LIFETIME);
@@ -2518,6 +2493,8 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     /* v2 or v3 network status fetch. */
     smartlist_t *dir_fps = smartlist_create();
     int is_v3 = !strcmpstart(url, "/tor/status-vote");
+    geoip_client_action_t act =
+        is_v3 ? GEOIP_CLIENT_NETWORKSTATUS : GEOIP_CLIENT_NETWORKSTATUS_V2;
     const char *request_type = NULL;
     const char *key = url + strlen("/tor/status/");
     long lifetime = NETWORKSTATUS_CACHE_LIFETIME;
@@ -2542,6 +2519,7 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
         write_http_status_line(conn, 404, "Consensus not signed by sufficient "
                                           "number of requested authorities");
         smartlist_free(dir_fps);
+        geoip_note_ns_response(act, GEOIP_REJECT_NOT_ENOUGH_SIGS);
         goto done;
       }
 
@@ -2554,6 +2532,7 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     if (!smartlist_len(dir_fps)) { /* we failed to create/cache cp */
       write_http_status_line(conn, 503, "Network status object unavailable");
       smartlist_free(dir_fps);
+      geoip_note_ns_response(act, GEOIP_REJECT_UNAVAILABLE);
       goto done;
     }
 
@@ -2561,11 +2540,13 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       write_http_status_line(conn, 404, "Not found");
       SMARTLIST_FOREACH(dir_fps, char *, cp, tor_free(cp));
       smartlist_free(dir_fps);
+      geoip_note_ns_response(act, GEOIP_REJECT_NOT_FOUND);
       goto done;
     } else if (!smartlist_len(dir_fps)) {
       write_http_status_line(conn, 304, "Not modified");
       SMARTLIST_FOREACH(dir_fps, char *, cp, tor_free(cp));
       smartlist_free(dir_fps);
+      geoip_note_ns_response(act, GEOIP_REJECT_NOT_MODIFIED);
       goto done;
     }
 
@@ -2577,16 +2558,25 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       write_http_status_line(conn, 503, "Directory busy, try again later");
       SMARTLIST_FOREACH(dir_fps, char *, fp, tor_free(fp));
       smartlist_free(dir_fps);
+      geoip_note_ns_response(act, GEOIP_REJECT_BUSY);
       goto done;
     }
 
-#ifdef ENABLE_GEOIP_STATS
+#ifdef ENABLE_DIRREQ_STATS
     {
-      geoip_client_action_t act =
-        is_v3 ? GEOIP_CLIENT_NETWORKSTATUS : GEOIP_CLIENT_NETWORKSTATUS_V2;
       struct in_addr in;
-      if (tor_inet_aton((TO_CONN(conn))->address, &in))
+      if (tor_inet_aton((TO_CONN(conn))->address, &in)) {
         geoip_note_client_seen(act, ntohl(in.s_addr), time(NULL));
+        geoip_note_ns_response(act, GEOIP_SUCCESS);
+        /* Note that a request for a network status has started, so that we
+         * can measure the download time later on. */
+        if (TO_CONN(conn)->dirreq_id)
+          geoip_start_dirreq(TO_CONN(conn)->dirreq_id, dlen, act,
+                             DIRREQ_TUNNELED);
+        else
+          geoip_start_dirreq(TO_CONN(conn)->global_identifier, dlen, act,
+                             DIRREQ_DIRECT);
+      }
     }
 #endif
 
@@ -2894,7 +2884,7 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
                                         "application/octet-stream",
                                         NULL, NULL, 0);
         note_request("/tor/rendezvous?/", desc_len);
-        /* need to send descp separately, because it may include nuls */
+        /* need to send descp separately, because it may include NULs */
         connection_write_to_buf(descp, desc_len, TO_CONN(conn));
         /* report successful fetch to statistic */
         if (options->HSAuthorityRecordStats) {
@@ -3220,6 +3210,18 @@ connection_dir_finished_flushing(dir_connection_t *conn)
   tor_assert(conn);
   tor_assert(conn->_base.type == CONN_TYPE_DIR);
 
+#ifdef ENABLE_DIRREQ_STATS
+  /* Note that we have finished writing the directory response. For direct
+   * connections this means we're done, for tunneled connections its only
+   * an intermediate step. */
+  if (TO_CONN(conn)->dirreq_id)
+    geoip_change_dirreq_state(TO_CONN(conn)->dirreq_id, DIRREQ_TUNNELED,
+                              DIRREQ_FLUSHING_DIR_CONN_FINISHED);
+  else
+    geoip_change_dirreq_state(TO_CONN(conn)->global_identifier,
+                              DIRREQ_DIRECT,
+                              DIRREQ_FLUSHING_DIR_CONN_FINISHED);
+#endif
   switch (conn->_base.state) {
     case DIR_CONN_STATE_CLIENT_SENDING:
       log_debug(LD_DIR,"client finished sending command.");

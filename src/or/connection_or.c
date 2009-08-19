@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -792,7 +792,7 @@ connection_or_connect(const tor_addr_t *_addr, uint16_t port,
       connection_free(TO_CONN(conn));
       return NULL;
     case 0:
-      connection_watch_events(TO_CONN(conn), EV_READ | EV_WRITE);
+      connection_watch_events(TO_CONN(conn), READ_EVENT | WRITE_EVENT);
       /* writable indicates finish, readable indicates broken link,
          error indicates broken link on windows */
       return conn;

@@ -1,6 +1,6 @@
 /* Copyright (c) 2003-2004, Roger Dingledine
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -29,7 +29,7 @@
  */
 #ifdef NDEBUG
 /* Nobody should ever want to build with NDEBUG set.  99% of our asserts will
- * be outside the critical path anyway, so it's silly to disable bugchecking
+ * be outside the critical path anyway, so it's silly to disable bug-checking
  * throughout the entire program just because a few asserts are slowing you
  * down.  Profile, optimize the critical path, and keep debugging on.
  *
@@ -154,6 +154,9 @@ void tor_log_mallinfo(int severity);
 /* Math functions */
 int tor_log2(uint64_t u64) ATTR_CONST;
 uint64_t round_to_power_of_2(uint64_t u64);
+unsigned round_to_next_multiple_of(unsigned number, unsigned divisor);
+uint32_t round_uint32_to_next_multiple_of(uint32_t number, uint32_t divisor);
+uint64_t round_uint64_to_next_multiple_of(uint64_t number, uint64_t divisor);
 
 /* String manipulation */
 
@@ -208,6 +211,7 @@ int base16_decode(char *dest, size_t destlen, const char *src, size_t srclen);
 
 /* Time helpers */
 long tv_udiff(const struct timeval *start, const struct timeval *end);
+long tv_mdiff(const struct timeval *start, const struct timeval *end);
 time_t tor_timegm(struct tm *tm);
 #define RFC1123_TIME_LEN 29
 void format_rfc1123_time(char *buf, time_t t);
@@ -293,6 +297,8 @@ int path_is_relative(const char *filename) ATTR_PURE;
 void start_daemon(void);
 void finish_daemon(const char *desired_cwd);
 void write_pidfile(char *filename);
+
+const char *libor_get_digests(void);
 
 #endif
 

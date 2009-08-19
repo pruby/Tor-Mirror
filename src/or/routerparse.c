@@ -1,7 +1,7 @@
 /* Copyright (c) 2001 Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -167,7 +167,7 @@ typedef struct token_rule_t {
   /** If true, we concatenate all arguments for this item into a single
    * string. */
   int concat_args;
-  /** Requirments on object syntax for this item. */
+  /** Requirements on object syntax for this item. */
   obj_syntax os;
   /** Lowest number of times this item may appear in a document. */
   int min_cnt;
@@ -217,7 +217,7 @@ typedef struct token_rule_t {
 /* Argument multiplicity: exactly <b>n</b> arguments. */
 #define EQ(n)       n,n,0
 
-/** List of tokens allowable in router derscriptors */
+/** List of tokens allowable in router descriptors */
 static token_rule_t routerdesc_token_table[] = {
   T0N("reject",              K_REJECT,              ARGS,    NO_OBJ ),
   T0N("accept",              K_ACCEPT,              ARGS,    NO_OBJ ),
@@ -601,7 +601,7 @@ router_append_dirobj_signature(char *buf, size_t buf_len, const char *digest,
  * <b>versionlist</b> is newer than <b>myversion</b>.  Else, return
  * VS_NEW_IN_SERIES if there is at least one member of <b>versionlist</b> in
  * the same series (major.minor.micro) as <b>myversion</b>, but no such member
- * is newer than <b>myversion.</b>.  Else, return VS_NEW if every memeber of
+ * is newer than <b>myversion.</b>.  Else, return VS_NEW if every member of
  * <b>versionlist</b> is older than <b>myversion</b>.  Else, return
  * VS_UNRECOMMENDED.
  *
@@ -1924,6 +1924,16 @@ routerstatus_parse_entry_from_string(memarea_t *area,
           goto err;
         }
         rs->has_bandwidth = 1;
+      } else if (!strcmpstart(tok->args[i], "Measured=")) {
+        int ok;
+        rs->measured_bw = tor_parse_ulong(strchr(tok->args[i], '=')+1, 10,
+                                          0, UINT32_MAX, &ok, NULL);
+        if (!ok) {
+          log_warn(LD_DIR, "Invalid Measured Bandwidth %s",
+                   escaped(tok->args[i]));
+          goto err;
+        }
+        rs->has_measured_bw = 1;
       }
     }
   }
@@ -1966,8 +1976,8 @@ routerstatus_parse_entry_from_string(memarea_t *area,
 }
 
 /** Helper to sort a smartlist of pointers to routerstatus_t */
-static int
-_compare_routerstatus_entries(const void **_a, const void **_b)
+int
+compare_routerstatus_entries(const void **_a, const void **_b)
 {
   const routerstatus_t *a = *_a, *b = *_b;
   return memcmp(a->identity_digest, b->identity_digest, DIGEST_LEN);
@@ -2114,8 +2124,8 @@ networkstatus_v2_parse_from_string(const char *s)
                                                    NULL, NULL, 0)))
       smartlist_add(ns->entries, rs);
   }
-  smartlist_sort(ns->entries, _compare_routerstatus_entries);
-  smartlist_uniq(ns->entries, _compare_routerstatus_entries,
+  smartlist_sort(ns->entries, compare_routerstatus_entries);
+  smartlist_uniq(ns->entries, compare_routerstatus_entries,
                  _free_duplicate_routerstatus_entry);
 
   if (tokenize_string(area,s, NULL, footer_tokens, dir_footer_token_table,0)) {
@@ -3166,7 +3176,7 @@ tokenize_string(memarea_t *area,
     }
     if ((flags & TS_NO_NEW_ANNOTATIONS)) {
       if (first_nonannotation != prev_len) {
-        log_warn(LD_DIR, "parse error: Unexpectd annotations.");
+        log_warn(LD_DIR, "parse error: Unexpected annotations.");
         return -1;
       }
     }
@@ -3453,7 +3463,7 @@ tor_version_same_series(tor_version_t *a, tor_version_t *b)
 }
 
 /** Helper: Given pointers to two strings describing tor versions, return -1
- * if _a precedes _b, 1 if _b preceeds _a, and 0 if they are equivalent.
+ * if _a precedes _b, 1 if _b precedes _a, and 0 if they are equivalent.
  * Used to sort a list of versions. */
 static int
 _compare_tor_version_str_ptr(const void **_a, const void **_b)

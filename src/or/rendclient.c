@@ -1,5 +1,5 @@
 /* Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -63,7 +63,7 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
   rend_cache_entry_t *entry;
   crypt_path_t *cpath;
   off_t dh_offset;
-  crypto_pk_env_t *intro_key; /* either Bob's public key or an intro key. */
+  crypto_pk_env_t *intro_key = NULL;
 
   tor_assert(introcirc->_base.purpose == CIRCUIT_PURPOSE_C_INTRODUCING);
   tor_assert(rendcirc->_base.purpose == CIRCUIT_PURPOSE_C_REND_READY);
@@ -80,23 +80,21 @@ rend_client_send_introduction(origin_circuit_t *introcirc,
     goto err;
   }
 
-  /* first 20 bytes of payload are the hash of bob's pk */
-  if (entry->parsed->version == 0) { /* unversioned descriptor */
-    intro_key = entry->parsed->pk;
-  } else { /* versioned descriptor */
-    intro_key = NULL;
-    SMARTLIST_FOREACH(entry->parsed->intro_nodes, rend_intro_point_t *,
-                      intro, {
-      if (!memcmp(introcirc->build_state->chosen_exit->identity_digest,
-                  intro->extend_info->identity_digest, DIGEST_LEN)) {
-        intro_key = intro->intro_key;
-        break;
-      }
-    });
-    if (!intro_key) {
-      log_warn(LD_BUG, "Internal error: could not find intro key.");
-      goto err;
+  /* first 20 bytes of payload are the hash of the intro key */
+  intro_key = NULL;
+  SMARTLIST_FOREACH(entry->parsed->intro_nodes, rend_intro_point_t *,
+                    intro, {
+    if (!memcmp(introcirc->build_state->chosen_exit->identity_digest,
+                intro->extend_info->identity_digest, DIGEST_LEN)) {
+      intro_key = intro->intro_key;
+      break;
     }
+  });
+  if (!intro_key) {
+    log_warn(LD_BUG, "Internal error: could not find intro key; we "
+             "only have a v2 rend desc with %d intro points.",
+             smartlist_len(entry->parsed->intro_nodes));
+    goto err;
   }
   if (crypto_pk_get_digest(intro_key, payload)<0) {
     log_warn(LD_BUG, "Internal error: couldn't hash public key.");
@@ -451,32 +449,9 @@ directory_get_from_hs_dir(const char *desc_id, const rend_data_t *rend_query)
   return 1;
 }
 
-/** If we are not currently fetching a rendezvous service descriptor
- * for the service ID <b>query</b>, start a directory connection to fetch a
- * new one.
- */
-void
-rend_client_refetch_renddesc(const char *query)
-{
-  if (!get_options()->FetchHidServDescriptors)
-    return;
-  log_info(LD_REND, "Fetching rendezvous descriptor for service %s",
-           escaped_safe_str(query));
-  if (connection_get_by_type_state_rendquery(CONN_TYPE_DIR, 0, query, 0)) {
-    log_info(LD_REND,"Would fetch a new renddesc here (for %s), but one is "
-             "already in progress.", escaped_safe_str(query));
-  } else {
-    /* not one already; initiate a dir rend desc lookup */
-    directory_get_from_dirserver(DIR_PURPOSE_FETCH_RENDDESC,
-                                 ROUTER_PURPOSE_GENERAL, query,
-                                 PDS_RETRY_IF_NO_SERVERS);
-  }
-}
-
-/** Start a connection to a hidden service directory to fetch a v2
- * rendezvous service descriptor for the base32-encoded service ID
- * <b>query</b>.
- */
+/** Unless we already have a descriptor for <b>rend_query</b> with at least
+ * one (possibly) working introduction point in it, start a connection to a
+ * hidden service directory to fetch a v2 rendezvous service descriptor. */
 void
 rend_client_refetch_v2_renddesc(const rend_data_t *rend_query)
 {
@@ -524,8 +499,8 @@ rend_client_refetch_v2_renddesc(const rend_data_t *rend_query)
   log_info(LD_REND, "Could not pick one of the responsible hidden "
                     "service directories to fetch descriptors, because "
                     "we already tried them all unsuccessfully.");
-  /* Close pending connections (unless a v0 request is still going on). */
-  rend_client_desc_trynow(rend_query->onion_address, 2);
+  /* Close pending connections. */
+  rend_client_desc_trynow(rend_query->onion_address);
   return;
 }
 
@@ -552,12 +527,7 @@ rend_client_remove_intro_point(extend_info_t *failed_intro,
   if (r==0) {
     log_info(LD_REND, "Unknown service %s. Re-fetching descriptor.",
              escaped_safe_str(rend_query->onion_address));
-    /* Fetch both, v0 and v2 rend descriptors in parallel. Use whichever
-     * arrives first. Exception: When using client authorization, only
-     * fetch v2 descriptors.*/
     rend_client_refetch_v2_renddesc(rend_query);
-    if (rend_query->auth_type == REND_NO_AUTH)
-      rend_client_refetch_renddesc(rend_query->onion_address);
     return 0;
   }
 
@@ -575,17 +545,12 @@ rend_client_remove_intro_point(extend_info_t *failed_intro,
     log_info(LD_REND,
              "No more intro points remain for %s. Re-fetching descriptor.",
              escaped_safe_str(rend_query->onion_address));
-    /* Fetch both, v0 and v2 rend descriptors in parallel. Use whichever
-     * arrives first. Exception: When using client authorization, only
-     * fetch v2 descriptors.*/
     rend_client_refetch_v2_renddesc(rend_query);
-    if (rend_query->auth_type == REND_NO_AUTH)
-      rend_client_refetch_renddesc(rend_query->onion_address);
 
     /* move all pending streams back to renddesc_wait */
     while ((conn = connection_get_by_type_state_rendquery(CONN_TYPE_AP,
                                    AP_CONN_STATE_CIRCUIT_WAIT,
-                                   rend_query->onion_address, -1))) {
+                                   rend_query->onion_address))) {
       conn->state = AP_CONN_STATE_RENDDESC_WAIT;
     }
 
@@ -694,24 +659,18 @@ rend_client_receive_rendezvous(origin_circuit_t *circ, const char *request,
   return -1;
 }
 
-/** Find all the apconns in state AP_CONN_STATE_RENDDESC_WAIT that
- * are waiting on query. If there's a working cache entry here
- * with at least one intro point, move them to the next state. If
- * <b>rend_version</b> is non-negative, fail connections that have
- * requested <b>query</b> unless there are still descriptor fetch
- * requests in progress for other descriptor versions than
- * <b>rend_version</b>.
- */
+/** Find all the apconns in state AP_CONN_STATE_RENDDESC_WAIT that are
+ * waiting on <b>query</b>. If there's a working cache entry here with at
+ * least one intro point, move them to the next state. */
 void
-rend_client_desc_trynow(const char *query, int rend_version)
+rend_client_desc_trynow(const char *query)
 {
   edge_connection_t *conn;
   rend_cache_entry_t *entry;
   time_t now = time(NULL);
 
   smartlist_t *conns = get_connection_array();
-  SMARTLIST_FOREACH(conns, connection_t *, _conn,
-  {
+  SMARTLIST_FOREACH_BEGIN(conns, connection_t *, _conn) {
     if (_conn->type != CONN_TYPE_AP ||
         _conn->state != AP_CONN_STATE_RENDDESC_WAIT ||
         _conn->marked_for_close)
@@ -743,17 +702,11 @@ rend_client_desc_trynow(const char *query, int rend_version)
           connection_mark_unattached_ap(conn, END_STREAM_REASON_CANT_ATTACH);
       }
     } else { /* 404, or fetch didn't get that far */
-      /* Unless there are requests for another descriptor version pending,
-       * close the connection. */
-      if (rend_version >= 0 &&
-          !connection_get_by_type_state_rendquery(CONN_TYPE_DIR, 0, query,
-                                                  rend_version == 0 ? 2 : 0)) {
-        log_notice(LD_REND,"Closing stream for '%s.onion': hidden service is "
-                   "unavailable (try again later).", safe_str(query));
-        connection_mark_unattached_ap(conn, END_STREAM_REASON_RESOLVEFAILED);
-      }
+      log_notice(LD_REND,"Closing stream for '%s.onion': hidden service is "
+                 "unavailable (try again later).", safe_str(query));
+      connection_mark_unattached_ap(conn, END_STREAM_REASON_RESOLVEFAILED);
     }
-  });
+  } SMARTLIST_FOREACH_END(_conn);
 }
 
 /** Return a newly allocated extend_info_t* for a randomly chosen introduction

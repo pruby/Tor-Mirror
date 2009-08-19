@@ -1,7 +1,6 @@
-# $Id$
 # Copyright (c) 2001-2004, Roger Dingledine
 # Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson
-# Copyright (c) 2007-2008, The Tor Project, Inc.
+# Copyright (c) 2007-2009, The Tor Project, Inc.
 # See LICENSE for licensing information
 
 AUTOMAKE_OPTIONS = foreign
@@ -26,15 +25,14 @@ dist-rpm:
 	    mkdir $$RPM_BUILD_DIR/$$subdir;                     \
 	done;                                                   \
 	mkdir $$RPM_BUILD_DIR/SOURCES/tor-$(VERSION);           \
-        cp -R ./ $$RPM_BUILD_DIR/SOURCES/tor-$(VERSION)/;       \
-        pushd $$RPM_BUILD_DIR/SOURCES/;                         \
-        tar zcf tor-$(VERSION).tar.gz ./;                       \
-        popd;                                                   \
-        rpmbuild -ba --define "_topdir $$RPM_BUILD_DIR" tor.spec; \
-        mv $$RPM_BUILD_DIR/SRPMS/* .;                           \
-        mv $$RPM_BUILD_DIR/RPMS/* .;                            \
-        rm -rf $$RPM_BUILD_DIR
-
+	cp -R ./ $$RPM_BUILD_DIR/SOURCES/tor-$(VERSION)/;       \
+	pushd $$RPM_BUILD_DIR/SOURCES/;                         \
+	tar zcf tor-$(VERSION).tar.gz ./;                       \
+	popd;                                                   \
+	LIBS=-lrt rpmbuild -ba --define "_topdir $$RPM_BUILD_DIR" tor.spec; \
+	mv $$RPM_BUILD_DIR/SRPMS/* .;                           \
+	mv $$RPM_BUILD_DIR/RPMS/* .;                            \
+	rm -rf $$RPM_BUILD_DIR
 
 dist-osx:
 	@if [ "x$(prefix)" != 'x/Library/Tor' ]; then \

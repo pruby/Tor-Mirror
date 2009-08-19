@@ -1,7 +1,7 @@
 /* Copyright (c) 2001, Matej Pfajfar.
  * Copyright (c) 2001-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -55,7 +55,9 @@ typedef struct crypto_digest_env_t crypto_digest_env_t;
 typedef struct crypto_dh_env_t crypto_dh_env_t;
 
 /* global state */
-int crypto_global_init(int hardwareAccel);
+int crypto_global_init(int hardwareAccel,
+                       const char *accelName,
+                       const char *accelPath);
 void crypto_thread_cleanup(void);
 int crypto_global_cleanup(void);
 

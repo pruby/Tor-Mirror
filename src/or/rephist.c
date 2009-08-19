@@ -1,5 +1,5 @@
 /* Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -24,7 +24,7 @@ uint32_t rephist_total_num=0;
 /** If the total weighted run count of all runs for a router ever falls
  * below this amount, the router can be treated as having 0 MTBF. */
 #define STABILITY_EPSILON   0.0001
-/** Value by which to discount all old intervals for MTBF purposses.  This
+/** Value by which to discount all old intervals for MTBF purposes.  This
  * is compounded every STABILITY_INTERVAL. */
 #define STABILITY_ALPHA     0.95
 /** Interval at which to discount all old intervals for MTBF purposes. */
@@ -501,7 +501,7 @@ rep_hist_get_weighted_fractional_uptime(const char *id, time_t when)
 /** Return a number representing how long we've known about the router whose
  * digest is <b>id</b>. Return 0 if the router is unknown.
  *
- * Be careful: this measure incresases monotonically as we know the router for
+ * Be careful: this measure increases monotonically as we know the router for
  * longer and longer, but it doesn't increase linearly.
  */
 long
@@ -683,9 +683,13 @@ rep_history_clean(time_t before)
   }
 }
 
-/** Write MTBF data to disk.  Returns 0 on success, negative on failure. */
+/** Write MTBF data to disk. Return 0 on success, negative on failure.
+ *
+ * If <b>missing_means_down</b>, then if we're about to write an entry
+ * that is still considered up but isn't in our routerlist, consider it
+ * to be down. */
 int
-rep_hist_record_mtbf_data(void)
+rep_hist_record_mtbf_data(time_t now, int missing_means_down)
 {
   char time_buf[ISO_TIME_LEN+1];
 
@@ -745,6 +749,18 @@ rep_hist_record_mtbf_data(void)
     hist = (or_history_t*) or_history_p;
 
     base16_encode(dbuf, sizeof(dbuf), digest, DIGEST_LEN);
+
+    if (missing_means_down && hist->start_of_run &&
+        !router_get_by_digest(digest)) {
+      /* We think this relay is running, but it's not listed in our
+       * routerlist. Somehow it fell out without telling us it went
+       * down. Complain and also correct it. */
+      log_info(LD_HIST,
+               "Relay '%s' is listed as up in rephist, but it's not in "
+               "our routerlist. Correcting.", dbuf);
+      rep_hist_note_router_unreachable(digest, now);
+    }
+
     PRINTF((f, "R %s\n", dbuf));
     if (hist->start_of_run > 0) {
       format_iso_time(time_buf, hist->start_of_run);
@@ -1303,6 +1319,201 @@ rep_hist_note_bytes_read(size_t num_bytes, time_t when)
 /* if we're smart, we can make this func and the one above share code */
   add_obs(read_array, when, num_bytes);
 }
+
+#ifdef ENABLE_EXIT_STATS
+/* Some constants */
+/** How long are the intervals for measuring exit stats? */
+#define EXIT_STATS_INTERVAL_SEC (24 * 60 * 60)
+/** To what multiple should byte numbers be rounded up? */
+#define EXIT_STATS_ROUND_UP_BYTES 1024
+/** To what multiple should stream counts be rounded up? */
+#define EXIT_STATS_ROUND_UP_STREAMS 4
+/** Number of TCP ports */
+#define EXIT_STATS_NUM_PORTS 65536
+/** Reciprocal of threshold (= 0.01%) of total bytes that a port needs to
+ * see in order to be included in exit stats. */
+#define EXIT_STATS_THRESHOLD_RECIPROCAL 10000
+
+/* The following data structures are arrays and no fancy smartlists or maps,
+ * so that all write operations can be done in constant time. This comes at
+ * the price of some memory (1.25 MB) and linear complexity when writing
+ * stats. */
+/** Number of bytes read in current period by exit port */
+static uint64_t exit_bytes_read[EXIT_STATS_NUM_PORTS];
+/** Number of bytes written in current period by exit port */
+static uint64_t exit_bytes_written[EXIT_STATS_NUM_PORTS];
+/** Number of streams opened in current period by exit port */
+static uint32_t exit_streams[EXIT_STATS_NUM_PORTS];
+
+/** When does the current exit stats period end? */
+static time_t end_of_current_exit_stats_period = 0;
+
+/** Write exit stats for the current period to disk and reset counters. */
+static void
+write_exit_stats(time_t when)
+{
+  char t[ISO_TIME_LEN+1];
+  int r, i, comma;
+  uint64_t *b, total_bytes, threshold_bytes, other_bytes;
+  uint32_t other_streams;
+
+  char *filename = get_datadir_fname("exit-stats");
+  open_file_t *open_file = NULL;
+  FILE *out = NULL;
+
+  log_debug(LD_HIST, "Considering writing exit port statistics to disk..");
+  while (when > end_of_current_exit_stats_period) {
+    format_iso_time(t, end_of_current_exit_stats_period);
+    log_info(LD_HIST, "Writing exit port statistics to disk for period "
+             "ending at %s.", t);
+
+    if (!open_file) {
+      out = start_writing_to_stdio_file(filename, OPEN_FLAGS_APPEND,
+                                        0600, &open_file);
+      if (!out) {
+        log_warn(LD_HIST, "Couldn't open '%s'.", filename);
+        goto done;
+      }
+    }
+
+    /* written yyyy-mm-dd HH:MM:SS (n s) */
+    if (fprintf(out, "written %s (%d s)\n", t, EXIT_STATS_INTERVAL_SEC) < 0)
+      goto done;
+
+    /* Count the total number of bytes, so that we can attribute all
+     * observations below a threshold of 1 / EXIT_STATS_THRESHOLD_RECIPROCAL
+     * of all bytes to a special port 'other'. */
+    total_bytes = 0;
+    for (i = 1; i < EXIT_STATS_NUM_PORTS; i++) {
+      total_bytes += exit_bytes_read[i];
+      total_bytes += exit_bytes_written[i];
+    }
+    threshold_bytes = total_bytes / EXIT_STATS_THRESHOLD_RECIPROCAL;
+
+    /* kibibytes-(read|written) port=kibibytes,.. */
+    for (r = 0; r < 2; r++) {
+      b = r ? exit_bytes_read : exit_bytes_written;
+      tor_assert(b);
+      if (fprintf(out, "%s ",
+                  r ? "kibibytes-read" : "kibibytes-written")<0)
+        goto done;
+
+      comma = 0;
+      other_bytes = 0;
+      for (i = 1; i < EXIT_STATS_NUM_PORTS; i++) {
+        if (b[i] > 0) {
+          if (exit_bytes_read[i] + exit_bytes_written[i] > threshold_bytes) {
+            uint64_t num = round_uint64_to_next_multiple_of(b[i],
+                                                EXIT_STATS_ROUND_UP_BYTES);
+            num /= 1024;
+            if (fprintf(out, "%s%d="U64_FORMAT,
+                        comma++ ? "," : "", i,
+                        U64_PRINTF_ARG(num)) < 0)
+              goto done;
+          } else
+            other_bytes += b[i];
+        }
+      }
+      other_bytes = round_uint64_to_next_multiple_of(other_bytes,
+                                         EXIT_STATS_ROUND_UP_BYTES);
+      other_bytes /= 1024;
+      if (fprintf(out, "%sother="U64_FORMAT"\n",
+                  comma ? "," : "", U64_PRINTF_ARG(other_bytes))<0)
+        goto done;
+    }
+    /* streams-opened port=num,.. */
+    if (fprintf(out, "streams-opened ")<0)
+      goto done;
+    comma = 0;
+    other_streams = 0;
+    for (i = 1; i < EXIT_STATS_NUM_PORTS; i++) {
+      if (exit_streams[i] > 0) {
+        if (exit_bytes_read[i] + exit_bytes_written[i] > threshold_bytes) {
+          uint32_t num = round_uint32_to_next_multiple_of(exit_streams[i],
+                                              EXIT_STATS_ROUND_UP_STREAMS);
+          if (fprintf(out, "%s%d=%u",
+                      comma++ ? "," : "", i, num)<0)
+            goto done;
+        } else
+          other_streams += exit_streams[i];
+      }
+    }
+    other_streams = round_uint32_to_next_multiple_of(other_streams,
+                                         EXIT_STATS_ROUND_UP_STREAMS);
+    if (fprintf(out, "%sother=%u\n",
+                comma ? "," : "", other_streams)<0)
+      goto done;
+    /* Reset counters */
+    memset(exit_bytes_read, 0, sizeof(exit_bytes_read));
+    memset(exit_bytes_written, 0, sizeof(exit_bytes_written));
+    memset(exit_streams, 0, sizeof(exit_streams));
+    end_of_current_exit_stats_period += EXIT_STATS_INTERVAL_SEC;
+  }
+
+  if (open_file)
+    finish_writing_to_file(open_file);
+  open_file = NULL;
+ done:
+  if (open_file)
+    abort_writing_to_file(open_file);
+  tor_free(filename);
+}
+
+/** Prepare to add an exit stats observation at second <b>when</b> by
+ * checking whether this observation lies in the current observation
+ * period; if not, shift the current period forward by one until the
+ * reported event fits it and write all results in between to disk. */
+static void
+add_exit_obs(time_t when)
+{
+  if (when > end_of_current_exit_stats_period) {
+    if (end_of_current_exit_stats_period)
+      write_exit_stats(when);
+    else
+      end_of_current_exit_stats_period = when + EXIT_STATS_INTERVAL_SEC;
+  }
+}
+
+/** Note that we wrote <b>num_bytes</b> to an exit connection to
+ * <b>port</b> in second <b>when</b>. */
+void
+rep_hist_note_exit_bytes_written(uint16_t port, size_t num_bytes,
+                                 time_t when)
+{
+  if (!get_options()->ExitPortStatistics)
+    return;
+  add_exit_obs(when);
+  exit_bytes_written[port] += num_bytes;
+  log_debug(LD_HIST, "Written %lu bytes to exit connection to port %d.",
+            (unsigned long)num_bytes, port);
+}
+
+/** Note that we read <b>num_bytes</b> from an exit connection to
+ * <b>port</b> in second <b>when</b>. */
+void
+rep_hist_note_exit_bytes_read(uint16_t port, size_t num_bytes,
+                              time_t when)
+{
+  if (!get_options()->ExitPortStatistics)
+    return;
+  add_exit_obs(when);
+  exit_bytes_read[port] += num_bytes;
+  log_debug(LD_HIST, "Read %lu bytes from exit connection to port %d.",
+            (unsigned long)num_bytes, port);
+}
+
+/** Note that we opened an exit stream to <b>port</b> in second
+ * <b>when</b>. */
+void
+rep_hist_note_exit_stream_opened(uint16_t port, time_t when)
+{
+  if (!get_options()->ExitPortStatistics)
+    return;
+  add_exit_obs(when);
+  exit_streams[port]++;
+  log_debug(LD_HIST, "Opened exit stream to port %d", port);
+}
+#endif
 
 /** Helper: Return the largest value in b->maxima.  (This is equal to the
  * most bandwidth used in any NUM_SECS_ROLLING_MEASURE period for the last
@@ -2389,4 +2600,175 @@ hs_usage_write_statistics_to_file(time_t now)
   tor_free(buf);
   tor_free(fname);
 }
+
+/*** cell statistics ***/
+
+#ifdef ENABLE_BUFFER_STATS
+/** Start of the current buffer stats interval. */
+time_t start_of_buffer_stats_interval;
+
+typedef struct circ_buffer_stats_t {
+  uint32_t processed_cells;
+  double mean_num_cells_in_queue;
+  double mean_time_cells_in_queue;
+  uint32_t local_circ_id;
+} circ_buffer_stats_t;
+
+/** Holds stats. */
+smartlist_t *circuits_for_buffer_stats = NULL;
+
+/** Remember cell statistics for circuit <b>circ</b> at time
+ * <b>end_of_interval</b> and reset cell counters in case the circuit
+ * remains open in the next measurement interval. */
+void
+add_circ_to_buffer_stats(circuit_t *circ, time_t end_of_interval)
+{
+  circ_buffer_stats_t *stat;
+  time_t start_of_interval;
+  int interval_length;
+  or_circuit_t *orcirc;
+  if (CIRCUIT_IS_ORIGIN(circ))
+    return;
+  orcirc = TO_OR_CIRCUIT(circ);
+  if (!orcirc->processed_cells)
+    return;
+  if (!circuits_for_buffer_stats)
+    circuits_for_buffer_stats = smartlist_create();
+  start_of_interval = circ->timestamp_created >
+      start_of_buffer_stats_interval ?
+        circ->timestamp_created :
+        start_of_buffer_stats_interval;
+  interval_length = (int) (end_of_interval - start_of_interval);
+  stat = tor_malloc_zero(sizeof(circ_buffer_stats_t));
+  stat->processed_cells = orcirc->processed_cells;
+  /* 1000.0 for s -> ms; 2.0 because of app-ward and exit-ward queues */
+  stat->mean_num_cells_in_queue = interval_length == 0 ? 0.0 :
+      (double) orcirc->total_cell_waiting_time /
+      (double) interval_length / 1000.0 / 2.0;
+  stat->mean_time_cells_in_queue =
+      (double) orcirc->total_cell_waiting_time /
+      (double) orcirc->processed_cells;
+  smartlist_add(circuits_for_buffer_stats, stat);
+  orcirc->total_cell_waiting_time = 0;
+  orcirc->processed_cells = 0;
+}
+
+/** Sorting helper: return -1, 1, or 0 based on comparison of two
+ * circ_buffer_stats_t */
+static int
+_buffer_stats_compare_entries(const void **_a, const void **_b)
+{
+  const circ_buffer_stats_t *a = *_a, *b = *_b;
+  if (a->processed_cells < b->processed_cells)
+    return 1;
+  else if (a->processed_cells > b->processed_cells)
+    return -1;
+  else
+    return 0;
+}
+
+/** Append buffer statistics to local file. */
+void
+dump_buffer_stats(void)
+{
+  time_t now = time(NULL);
+  char *filename;
+  char written[ISO_TIME_LEN+1];
+  open_file_t *open_file = NULL;
+  FILE *out;
+#define SHARES 10
+  int processed_cells[SHARES], circs_in_share[SHARES],
+      number_of_circuits, i;
+  double queued_cells[SHARES], time_in_queue[SHARES];
+  smartlist_t *str_build = smartlist_create();
+  char *str = NULL;
+  char buf[32];
+  circuit_t *circ;
+  /* add current circuits to stats */
+  for (circ = _circuit_get_global_list(); circ; circ = circ->next)
+    add_circ_to_buffer_stats(circ, now);
+  /* calculate deciles */
+  memset(processed_cells, 0, SHARES * sizeof(int));
+  memset(circs_in_share, 0, SHARES * sizeof(int));
+  memset(queued_cells, 0, SHARES * sizeof(double));
+  memset(time_in_queue, 0, SHARES * sizeof(double));
+  smartlist_sort(circuits_for_buffer_stats,
+                 _buffer_stats_compare_entries);
+  number_of_circuits = smartlist_len(circuits_for_buffer_stats);
+  i = 0;
+  SMARTLIST_FOREACH_BEGIN(circuits_for_buffer_stats,
+                          circ_buffer_stats_t *, stat)
+  {
+    int share = i++ * SHARES / number_of_circuits;
+    processed_cells[share] += stat->processed_cells;
+    queued_cells[share] += stat->mean_num_cells_in_queue;
+    time_in_queue[share] += stat->mean_time_cells_in_queue;
+    circs_in_share[share]++;
+  }
+  SMARTLIST_FOREACH_END(stat);
+  /* clear buffer stats history */
+  SMARTLIST_FOREACH(circuits_for_buffer_stats, circ_buffer_stats_t *,
+      stat, tor_free(stat));
+  smartlist_clear(circuits_for_buffer_stats);
+  /* write to file */
+  filename = get_datadir_fname("buffer-stats");
+  out = start_writing_to_stdio_file(filename, OPEN_FLAGS_APPEND,
+                                    0600, &open_file);
+  if (!out)
+    goto done;
+  format_iso_time(written, now);
+  if (fprintf(out, "written %s (%d s)\n", written,
+              DUMP_BUFFER_STATS_INTERVAL) < 0)
+    goto done;
+  for (i = 0; i < SHARES; i++) {
+    tor_snprintf(buf, sizeof(buf), "%d", !circs_in_share[i] ? 0 :
+                 processed_cells[i] / circs_in_share[i]);
+    smartlist_add(str_build, tor_strdup(buf));
+  }
+  str = smartlist_join_strings(str_build, ",", 0, NULL);
+  if (fprintf(out, "processed-cells %s\n", str) < 0)
+    goto done;
+  tor_free(str);
+  SMARTLIST_FOREACH(str_build, char *, c, tor_free(c));
+  smartlist_clear(str_build);
+  for (i = 0; i < SHARES; i++) {
+    tor_snprintf(buf, sizeof(buf), "%.2f", circs_in_share[i] == 0 ? 0.0 :
+                 queued_cells[i] / (double) circs_in_share[i]);
+    smartlist_add(str_build, tor_strdup(buf));
+  }
+  str = smartlist_join_strings(str_build, ",", 0, NULL);
+  if (fprintf(out, "queued-cells %s\n", str) < 0)
+    goto done;
+  tor_free(str);
+  SMARTLIST_FOREACH(str_build, char *, c, tor_free(c));
+  smartlist_clear(str_build);
+  for (i = 0; i < SHARES; i++) {
+    tor_snprintf(buf, sizeof(buf), "%.0f", circs_in_share[i] == 0 ? 0.0 :
+                 time_in_queue[i] / (double) circs_in_share[i]);
+    smartlist_add(str_build, tor_strdup(buf));
+  }
+  str = smartlist_join_strings(str_build, ",", 0, NULL);
+  if (fprintf(out, "time-in-queue %s\n", str) < 0)
+    goto done;
+  tor_free(str);
+  SMARTLIST_FOREACH(str_build, char *, c, tor_free(c));
+  smartlist_free(str_build);
+  str_build = NULL;
+  if (fprintf(out, "number-of-circuits-per-share %d\n",
+              (number_of_circuits + SHARES - 1) / SHARES) < 0)
+    goto done;
+  finish_writing_to_file(open_file);
+  open_file = NULL;
+ done:
+  if (open_file)
+    abort_writing_to_file(open_file);
+  tor_free(filename);
+  if (str_build) {
+    SMARTLIST_FOREACH(str_build, char *, c, tor_free(c));
+    smartlist_free(str_build);
+  }
+  tor_free(str);
+#undef SHARES
+}
+#endif
 

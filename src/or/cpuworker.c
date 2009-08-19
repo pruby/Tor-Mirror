@@ -1,6 +1,6 @@
 /* Copyright (c) 2003-2004, Roger Dingledine.
  * Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson.
- * Copyright (c) 2007-2008, The Tor Project, Inc. */
+ * Copyright (c) 2007-2009, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 /**
@@ -444,8 +444,10 @@ assign_onionskin_to_cpuworker(connection_t *cpuworker,
   if (1) {
     if (num_cpuworkers_busy == num_cpuworkers) {
       log_debug(LD_OR,"No idle cpuworkers. Queuing.");
-      if (onion_pending_add(circ, onionskin) < 0)
+      if (onion_pending_add(circ, onionskin) < 0) {
+        tor_free(onionskin);
         return -1;
+      }
       return 0;
     }
 
