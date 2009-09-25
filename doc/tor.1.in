@@ -1,4 +1,4 @@
-.TH TOR 1 "January 2009" "TOR"
+.TH TOR 1 "August 2009" "TOR"
 .SH NAME
 tor \- The second-generation onion router
 .SH SYNOPSIS
@@ -297,6 +297,25 @@ If defined, Tor will use this username:password for Basic HTTPS proxy
 authentication, as in RFC 2617. This is currently the only form of
 HTTPS proxy authentication that Tor supports; feel free to submit a
 patch if you want it to support others.
+.LP
+.TP
+\fBSocks4Proxy\fR \fIhost\fR[:\fIport\fR]\fP
+Tor will make all OR connections through the SOCKS 4 proxy at host:port
+(or host:1080 if port is not specified).
+.LP
+.TP
+\fBSocks5Proxy\fR \fIhost\fR[:\fIport\fR]\fP
+Tor will make all OR connections through the SOCKS 5 proxy at host:port
+(or host:1080 if port is not specified).
+.LP
+.TP
+\fBSocks5ProxyUsername\fR \fIusername\fP
+.LP
+.TP
+\fBSocks5ProxyPassword\fR \fIpassword\fP
+If defined, authenticate to the SOCKS 5 server using username and password
+in accordance to RFC 1929. Both username and password must be between 1 and 255
+characters.
 .LP
 .TP
 \fBKeepalivePeriod \fR\fINUM\fP
@@ -1056,6 +1075,36 @@ behalf of clients.
 .TP
 \fBGeoIPFile \fR\fIfilename\fP
 A filename containing GeoIP data, for use with BridgeRecordUsageByCountry.
+.LP
+.TP
+\fBCellStatistics \fR\fB0\fR|\fB1\fR\fP
+When this option is enabled, Tor writes statistics on the mean time that
+cells spend in circuit queues to disk every 24 hours. Cannot be changed
+while Tor is running. (Default: 0)
+.LP
+.TP
+\fBDirReqStatistics \fR\fB0\fR|\fB1\fR\fP
+When this option is enabled, Tor writes statistics on the number and
+response time of network status requests to disk every 24 hours. Cannot be
+changed while Tor is running. (Default: 0)
+.LP
+.TP
+\fBEntryStatistics \fR\fB0\fR|\fB1\fR\fP
+When this option is enabled, Tor writes statistics on the number of
+directly connecting clients to disk every 24 hours. Cannot be changed
+while Tor is running. (Default: 0)
+.LP
+.TP
+\fBExitPortStatistics \fR\fB0\fR|\fB1\fR\fP
+When this option is enabled, Tor writes statistics on the number of
+relayed bytes and opened stream per exit port to disk every 24 hours.
+Cannot be changed while Tor is running. (Default: 0)
+.LP
+.TP
+\fBExtraInfoStatistics \fR\fB0\fR|\fB1\fR\fP
+When this option is enabled, Tor includes previously gathered statistics
+in its extra-info documents that it uploads to the directory authorities.
+(Default: 0)
 
 .SH DIRECTORY SERVER OPTIONS
 .PP
@@ -1194,6 +1243,11 @@ When this is set then
 \fBVersioningAuthoritativeDirectory\fP should be set too.
 .LP
 .TP
+\fBConsensusParams \fR\fISTRING\fP
+STRING is a space-separated list of key=value pairs that Tor will
+include in the "params" line of its networkstatus vote.
+.LP
+.TP
 \fBDirAllowPrivateAddresses \fR\fB0\fR|\fB1\fR\fP
 If set to 1, Tor will accept router descriptors with arbitrary "Address"
 elements. Otherwise, if the address is not an IP address or is a private
@@ -1320,7 +1374,7 @@ if you're using a Tor controller that handles hidserv publishing for you.
 .TP
 \fBHiddenServiceVersion \fR\fIversion\fR,\fIversion\fR,\fI...\fP
 A list of rendezvous service descriptor versions to publish for the hidden
-service. Possible version numbers are 0 and 2. (Default: 0, 2)
+service. Currently, only version 2 is supported. (Default: 2)
 .LP
 .TP
 \fBHiddenServiceAuthorizeClient \fR\fIauth-type\fR \fR\fIclient-name\fR,\fIclient-name\fR,\fI...\fP
@@ -1465,7 +1519,7 @@ The most recently downloaded network status document for each authority.  Each f
 .LP
 .TP
 .B \fIDataDirectory\fB/cached-descriptors\fR and \fBcached-descriptors.new\fR
-These files hold downloaded router statuses.  Some routers may appear more than once; if so, the most recently published descriptor is used.    Lines beginning with @-signs are annotations that contain more information about a given router.  The ".new" file is an append-only journal; when it gets too large, all entries are merged into a new cached-routers file.
+These files hold downloaded router statuses.  Some routers may appear more than once; if so, the most recently published descriptor is used.    Lines beginning with @-signs are annotations that contain more information about a given router.  The ".new" file is an append-only journal; when it gets too large, all entries are merged into a new cached-descriptors file.
 .LP
 .TP
 .B \fIDataDirectory\fB/cached-routers\fR and \fBcached-routers.new\fR

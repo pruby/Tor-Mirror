@@ -554,11 +554,6 @@ void
 connection_dir_request_failed(dir_connection_t *conn)
 {
   if (directory_conn_is_self_reachability_test(conn)) {
-    routerinfo_t *me = router_get_my_routerinfo();
-    if (me)
-      control_event_server_status(LOG_WARN,
-                                  "REACHABILITY_FAILED DIRADDRESS=%s:%d",
-                                  me->address, me->dir_port);
     return; /* this was a test fetch. don't retry. */
   }
   if (entry_list_can_grow(get_options()))
@@ -747,6 +742,15 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
 
   log_debug(LD_DIR, "Initiating %s", dir_conn_purpose_to_string(dir_purpose));
 
+  /* ensure that we don't make direct connections when a SOCKS server is
+   * configured. */
+  if (!anonymized_connection && !use_begindir && !options->HttpProxy &&
+      (options->Socks4Proxy || options->Socks5Proxy)) {
+    log_warn(LD_DIR, "Cannot connect to a directory server through a "
+                     "SOCKS proxy!");
+    return;
+  }
+
   conn = dir_connection_new(AF_INET);
 
   /* set up conn so it's got all the data we need to remember */
@@ -772,7 +776,7 @@ directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
     /* then we want to connect to dirport directly */
 
     if (options->HttpProxy) {
-      tor_addr_from_ipv4h(&addr, options->HttpProxyAddr);
+      tor_addr_copy(&addr, &options->HttpProxyAddr);
       dir_port = options->HttpProxyPort;
     }
 
@@ -877,7 +881,7 @@ static char *
 directory_get_consensus_url(int supports_conditional_consensus)
 {
   char *url;
-  int len;
+  size_t len;
 
   if (supports_conditional_consensus) {
     char *authority_id_list;
@@ -1649,6 +1653,8 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
              "'%s:%d'",(int) body_len, conn->_base.address, conn->_base.port);
     if (trusted_dirs_load_certs_from_string(body, 0, 1)<0) {
       log_warn(LD_DIR, "Unable to parse fetched certificates");
+      /* if we fetched more than one and only some failed, the successful
+       * ones got flushed to disk so it's safe to call this on them */
       connection_dir_download_cert_failed(conn, status_code);
     } else {
       directory_info_has_arrived(now, 0);
@@ -2326,7 +2332,7 @@ client_likes_consensus(networkstatus_t *v, const char *want_url)
   need_at_least = smartlist_len(want_authorities)/2+1;
   SMARTLIST_FOREACH(want_authorities, const char *, d, {
     char want_digest[DIGEST_LEN];
-    int want_len = strlen(d)/2;
+    size_t want_len = strlen(d)/2;
     if (want_len > DIGEST_LEN)
       want_len = DIGEST_LEN;
 
@@ -2562,7 +2568,6 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       goto done;
     }
 
-#ifdef ENABLE_DIRREQ_STATS
     {
       struct in_addr in;
       if (tor_inet_aton((TO_CONN(conn))->address, &in)) {
@@ -2578,7 +2583,6 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
                              DIRREQ_DIRECT);
       }
     }
-#endif
 
     // note_request(request_type,dlen);
     (void) request_type;
@@ -3210,7 +3214,6 @@ connection_dir_finished_flushing(dir_connection_t *conn)
   tor_assert(conn);
   tor_assert(conn->_base.type == CONN_TYPE_DIR);
 
-#ifdef ENABLE_DIRREQ_STATS
   /* Note that we have finished writing the directory response. For direct
    * connections this means we're done, for tunneled connections its only
    * an intermediate step. */
@@ -3221,7 +3224,6 @@ connection_dir_finished_flushing(dir_connection_t *conn)
     geoip_change_dirreq_state(TO_CONN(conn)->global_identifier,
                               DIRREQ_DIRECT,
                               DIRREQ_FLUSHING_DIR_CONN_FINISHED);
-#endif
   switch (conn->_base.state) {
     case DIR_CONN_STATE_CLIENT_SENDING:
       log_debug(LD_DIR,"client finished sending command.");

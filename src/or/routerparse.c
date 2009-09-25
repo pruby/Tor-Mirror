@@ -62,6 +62,31 @@ typedef enum {
   K_HIDDEN_SERVICE_DIR,
   K_ALLOW_SINGLE_HOP_EXITS,
 
+  K_DIRREQ_END,
+  K_DIRREQ_V2_IPS,
+  K_DIRREQ_V3_IPS,
+  K_DIRREQ_V2_REQS,
+  K_DIRREQ_V3_REQS,
+  K_DIRREQ_V2_SHARE,
+  K_DIRREQ_V3_SHARE,
+  K_DIRREQ_V2_RESP,
+  K_DIRREQ_V3_RESP,
+  K_DIRREQ_V2_DIR,
+  K_DIRREQ_V3_DIR,
+  K_DIRREQ_V2_TUN,
+  K_DIRREQ_V3_TUN,
+  K_ENTRY_END,
+  K_ENTRY_IPS,
+  K_CELL_END,
+  K_CELL_PROCESSED,
+  K_CELL_QUEUED,
+  K_CELL_TIME,
+  K_CELL_CIRCS,
+  K_EXIT_END,
+  K_EXIT_WRITTEN,
+  K_EXIT_READ,
+  K_EXIT_OPENED,
+
   K_DIR_KEY_CERTIFICATE_VERSION,
   K_DIR_IDENTITY_KEY,
   K_DIR_KEY_PUBLISHED,
@@ -77,6 +102,7 @@ typedef enum {
   K_VOTING_DELAY,
 
   K_KNOWN_FLAGS,
+  K_PARAMS,
   K_VOTE_DIGEST,
   K_CONSENSUS_DIGEST,
   K_CONSENSUS_METHODS,
@@ -257,6 +283,31 @@ static token_rule_t extrainfo_token_table[] = {
   T0N("opt",                 K_OPT,             CONCAT_ARGS, OBJ_OK ),
   T01("read-history",        K_READ_HISTORY,        ARGS,    NO_OBJ ),
   T01("write-history",       K_WRITE_HISTORY,       ARGS,    NO_OBJ ),
+  T01("dirreq-stats-end",    K_DIRREQ_END,          ARGS,    NO_OBJ ),
+  T01("dirreq-v2-ips",       K_DIRREQ_V2_IPS,       ARGS,    NO_OBJ ),
+  T01("dirreq-v3-ips",       K_DIRREQ_V3_IPS,       ARGS,    NO_OBJ ),
+  T01("dirreq-v2-reqs",      K_DIRREQ_V2_REQS,      ARGS,    NO_OBJ ),
+  T01("dirreq-v3-reqs",      K_DIRREQ_V3_REQS,      ARGS,    NO_OBJ ),
+  T01("dirreq-v2-share",     K_DIRREQ_V2_SHARE,     ARGS,    NO_OBJ ),
+  T01("dirreq-v3-share",     K_DIRREQ_V3_SHARE,     ARGS,    NO_OBJ ),
+  T01("dirreq-v2-resp",      K_DIRREQ_V2_RESP,      ARGS,    NO_OBJ ),
+  T01("dirreq-v3-resp",      K_DIRREQ_V3_RESP,      ARGS,    NO_OBJ ),
+  T01("dirreq-v2-direct-dl", K_DIRREQ_V2_DIR,       ARGS,    NO_OBJ ),
+  T01("dirreq-v3-direct-dl", K_DIRREQ_V3_DIR,       ARGS,    NO_OBJ ),
+  T01("dirreq-v2-tunneled-dl", K_DIRREQ_V2_TUN,     ARGS,    NO_OBJ ),
+  T01("dirreq-v3-tunneled-dl", K_DIRREQ_V3_TUN,     ARGS,    NO_OBJ ),
+  T01("entry-stats-end",     K_ENTRY_END,           ARGS,    NO_OBJ ),
+  T01("entry-ips",           K_ENTRY_IPS,           ARGS,    NO_OBJ ),
+  T01("cell-stats-end",      K_CELL_END,            ARGS,    NO_OBJ ),
+  T01("cell-processed-cells", K_CELL_PROCESSED,     ARGS,    NO_OBJ ),
+  T01("cell-queued-cells",   K_CELL_QUEUED,         ARGS,    NO_OBJ ),
+  T01("cell-time-in-queue",  K_CELL_TIME,           ARGS,    NO_OBJ ),
+  T01("cell-circuits-per-decile", K_CELL_CIRCS,     ARGS,    NO_OBJ ),
+  T01("exit-stats-end",      K_EXIT_END,            ARGS,    NO_OBJ ),
+  T01("exit-kibibytes-written", K_EXIT_WRITTEN,     ARGS,    NO_OBJ ),
+  T01("exit-kibibytes-read", K_EXIT_READ,           ARGS,    NO_OBJ ),
+  T01("exit-streams-opened", K_EXIT_OPENED,         ARGS,    NO_OBJ ),
+
   T1_START( "extra-info",          K_EXTRA_INFO,          GE(2),   NO_OBJ ),
 
   END_OF_TABLE
@@ -383,6 +434,7 @@ static token_rule_t networkstatus_token_table[] = {
   T1("valid-until",            K_VALID_UNTIL,      CONCAT_ARGS, NO_OBJ ),
   T1("voting-delay",           K_VOTING_DELAY,     GE(2),       NO_OBJ ),
   T1("known-flags",            K_KNOWN_FLAGS,      ARGS,        NO_OBJ ),
+  T01("params",                K_PARAMS,           ARGS,        NO_OBJ ),
   T( "fingerprint",            K_FINGERPRINT,      CONCAT_ARGS, NO_OBJ ),
 
   CERTIFICATE_MEMBERS
@@ -420,6 +472,7 @@ static token_rule_t networkstatus_consensus_token_table[] = {
   T01("client-versions",     K_CLIENT_VERSIONS, CONCAT_ARGS, NO_OBJ ),
   T01("server-versions",     K_SERVER_VERSIONS, CONCAT_ARGS, NO_OBJ ),
   T01("consensus-method",    K_CONSENSUS_METHOD,    EQ(1),   NO_OBJ),
+  T01("params",                K_PARAMS,           ARGS,        NO_OBJ ),
 
   END_OF_TABLE
 };
@@ -494,6 +547,34 @@ static int tor_version_same_series(tor_version_t *a, tor_version_t *b);
 #else
 #define DUMP_AREA(a,name) STMT_NIL
 #endif
+
+/** Last time we dumped a descriptor to disk. */
+static time_t last_desc_dumped = 0;
+
+/** For debugging purposes, dump unparseable descriptor *<b>desc</b> of
+ * type *<b>type</b> to file $DATADIR/unparseable-desc. Do not write more
+ * than one descriptor to disk per minute. If there is already such a
+ * file in the data directory, overwrite it. */
+static void
+dump_desc(const char *desc, const char *type)
+{
+  time_t now = time(NULL);
+  tor_assert(desc);
+  tor_assert(type);
+  if (!last_desc_dumped || last_desc_dumped + 60 < now) {
+    char *debugfile = get_datadir_fname("unparseable-desc");
+    size_t filelen = 50 + strlen(type) + strlen(desc);
+    char *content = tor_malloc_zero(filelen);
+    tor_snprintf(content, filelen, "Unable to parse descriptor of type "
+                 "%s:\n%s", type, desc);
+    write_str_to_file(debugfile, content, 0);
+    log_info(LD_DIR, "Unable to parse descriptor of type %s. See file "
+             "unparseable-desc in data directory for details.", type);
+    tor_free(content);
+    tor_free(debugfile);
+    last_desc_dumped = now;
+  }
+}
 
 /** Set <b>digest</b> to the SHA-1 digest of the hash of the directory in
  * <b>s</b>.  Return 0 on success, -1 on failure.
@@ -684,7 +765,7 @@ router_parse_directory(const char *str)
   char digest[DIGEST_LEN];
   time_t published_on;
   int r;
-  const char *end, *cp;
+  const char *end, *cp, *str_dup = str;
   smartlist_t *tokens = NULL;
   crypto_pk_env_t *declared_key = NULL;
   memarea_t *area = memarea_new();
@@ -757,6 +838,7 @@ router_parse_directory(const char *str)
   r = 0;
   goto done;
  err:
+  dump_desc(str_dup, "v1 directory");
   r = -1;
  done:
   if (declared_key) crypto_free_pk_env(declared_key);
@@ -783,7 +865,7 @@ router_parse_runningrouters(const char *str)
   int r = -1;
   crypto_pk_env_t *declared_key = NULL;
   smartlist_t *tokens = NULL;
-  const char *eos = str + strlen(str);
+  const char *eos = str + strlen(str), *str_dup = str;
   memarea_t *area = NULL;
 
   if (router_get_runningrouters_hash(str, digest)) {
@@ -824,6 +906,7 @@ router_parse_runningrouters(const char *str)
 
   r = 0;
  err:
+  dump_desc(str_dup, "v1 running-routers");
   if (declared_key) crypto_free_pk_env(declared_key);
   if (tokens) {
     SMARTLIST_FOREACH(tokens, directory_token_t *, t, token_free(t));
@@ -1133,7 +1216,7 @@ router_parse_entry_from_string(const char *s, const char *end,
   smartlist_t *tokens = NULL, *exit_policy_tokens = NULL;
   directory_token_t *tok;
   struct in_addr in;
-  const char *start_of_annotations, *cp;
+  const char *start_of_annotations, *cp, *s_dup = s;
   size_t prepend_len = prepend_annotations ? strlen(prepend_annotations) : 0;
   int ok = 1;
   memarea_t *area = NULL;
@@ -1423,6 +1506,7 @@ router_parse_entry_from_string(const char *s, const char *end,
   goto done;
 
  err:
+  dump_desc(s_dup, "router descriptor");
   routerinfo_free(router);
   router = NULL;
  done:
@@ -1457,6 +1541,7 @@ extrainfo_parse_entry_from_string(const char *s, const char *end,
   crypto_pk_env_t *key = NULL;
   routerinfo_t *router = NULL;
   memarea_t *area = NULL;
+  const char *s_dup = s;
 
   if (!end) {
     end = s + strlen(s);
@@ -1545,6 +1630,7 @@ extrainfo_parse_entry_from_string(const char *s, const char *end,
 
   goto done;
  err:
+  dump_desc(s_dup, "extra-info descriptor");
   if (extrainfo)
     extrainfo_free(extrainfo);
   extrainfo = NULL;
@@ -1574,6 +1660,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
   size_t len;
   int found;
   memarea_t *area = NULL;
+  const char *s_dup = s;
 
   s = eat_whitespace(s);
   eos = strstr(s, "\ndir-key-certification");
@@ -1727,6 +1814,7 @@ authority_cert_parse_from_string(const char *s, const char **end_of_string)
   }
   return cert;
  err:
+  dump_desc(s_dup, "authority cert");
   authority_cert_free(cert);
   SMARTLIST_FOREACH(tokens, directory_token_t *, t, token_free(t));
   smartlist_free(tokens);
@@ -1777,7 +1865,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
                                      vote_routerstatus_t *vote_rs,
                                      int consensus_method)
 {
-  const char *eos;
+  const char *eos, *s_dup = *s;
   routerstatus_t *rs = NULL;
   directory_token_t *tok;
   char timebuf[ISO_TIME_LEN+1];
@@ -1917,8 +2005,9 @@ routerstatus_parse_entry_from_string(memarea_t *area,
     for (i=0; i < tok->n_args; ++i) {
       if (!strcmpstart(tok->args[i], "Bandwidth=")) {
         int ok;
-        rs->bandwidth = tor_parse_ulong(strchr(tok->args[i], '=')+1, 10,
-                                        0, UINT32_MAX, &ok, NULL);
+        rs->bandwidth = (uint32_t)tor_parse_ulong(strchr(tok->args[i], '=')+1,
+                                                  10, 0, UINT32_MAX,
+                                                  &ok, NULL);
         if (!ok) {
           log_warn(LD_DIR, "Invalid Bandwidth %s", escaped(tok->args[i]));
           goto err;
@@ -1926,8 +2015,9 @@ routerstatus_parse_entry_from_string(memarea_t *area,
         rs->has_bandwidth = 1;
       } else if (!strcmpstart(tok->args[i], "Measured=")) {
         int ok;
-        rs->measured_bw = tor_parse_ulong(strchr(tok->args[i], '=')+1, 10,
-                                          0, UINT32_MAX, &ok, NULL);
+        rs->measured_bw =
+            (uint32_t)tor_parse_ulong(strchr(tok->args[i], '=')+1,
+                                      10, 0, UINT32_MAX, &ok, NULL);
         if (!ok) {
           log_warn(LD_DIR, "Invalid Measured Bandwidth %s",
                    escaped(tok->args[i]));
@@ -1960,6 +2050,7 @@ routerstatus_parse_entry_from_string(memarea_t *area,
 
   goto done;
  err:
+  dump_desc(s_dup, "routerstatus entry");
   if (rs && !vote_rs)
     routerstatus_free(rs);
   rs = NULL;
@@ -2001,7 +2092,7 @@ _free_duplicate_routerstatus_entry(void *e)
 networkstatus_v2_t *
 networkstatus_v2_parse_from_string(const char *s)
 {
-  const char *eos;
+  const char *eos, *s_dup = s;
   smartlist_t *tokens = smartlist_create();
   smartlist_t *footer_tokens = smartlist_create();
   networkstatus_v2_t *ns = NULL;
@@ -2150,6 +2241,7 @@ networkstatus_v2_parse_from_string(const char *s)
 
   goto done;
  err:
+  dump_desc(s_dup, "v2 networkstatus");
   if (ns)
     networkstatus_v2_free(ns);
   ns = NULL;
@@ -2176,7 +2268,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
   networkstatus_voter_info_t *voter = NULL;
   networkstatus_t *ns = NULL;
   char ns_digest[DIGEST_LEN];
-  const char *cert, *end_of_header, *end_of_footer;
+  const char *cert, *end_of_header, *end_of_footer, *s_dup = s;
   directory_token_t *tok;
   int ok;
   struct in_addr in;
@@ -2317,6 +2409,34 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
   if (!inorder) {
     log_warn(LD_DIR, "known-flags not in order");
     goto err;
+  }
+
+  tok = find_opt_by_keyword(tokens, K_PARAMS);
+  if (tok) {
+    inorder = 1;
+    ns->net_params = smartlist_create();
+    for (i = 0; i < tok->n_args; ++i) {
+      int ok=0;
+      char *eq = strchr(tok->args[i], '=');
+      if (!eq) {
+        log_warn(LD_DIR, "Bad element '%s' in params", escaped(tok->args[i]));
+        goto err;
+      }
+      tor_parse_long(eq+1, 10, INT32_MIN, INT32_MAX, &ok, NULL);
+      if (!ok) {
+        log_warn(LD_DIR, "Bad element '%s' in params", escaped(tok->args[i]));
+        goto err;
+      }
+      if (i > 0 && strcmp(tok->args[i-1], tok->args[i]) >= 0) {
+        log_warn(LD_DIR, "%s >= %s", tok->args[i-1], tok->args[i]);
+        inorder = 0;
+      }
+      smartlist_add(ns->net_params, tor_strdup(tok->args[i]));
+    }
+    if (!inorder) {
+      log_warn(LD_DIR, "params not in order");
+      goto err;
+    }
   }
 
   ns->voters = smartlist_create();
@@ -2518,6 +2638,14 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
     } else {
       if (tok->object_size >= INT_MAX)
         goto err;
+      /* We already parsed a vote from this voter. Use the first one. */
+      if (v->signature) {
+        log_fn(LOG_PROTOCOL_WARN, LD_DIR, "We received a networkstatus "
+                   "that contains two votes from the same voter. Ignoring "
+                   "the second vote.");
+        continue;
+      }
+
       v->signature = tor_memdup(tok->object_body, tok->object_size);
       v->signature_len = (int) tok->object_size;
     }
@@ -2527,6 +2655,10 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
   if (! n_signatures) {
     log_warn(LD_DIR, "No signatures on networkstatus vote.");
     goto err;
+  } else if (ns->type == NS_TYPE_VOTE && n_signatures != 1) {
+    log_warn(LD_DIR, "Received more than one signature on a "
+             "network-status vote.");
+    goto err;
   }
 
   if (eos_out)
@@ -2534,6 +2666,7 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
 
   goto done;
  err:
+  dump_desc(s_dup, "v3 networkstatus");
   if (ns)
     networkstatus_vote_free(ns);
   ns = NULL;
@@ -3325,7 +3458,7 @@ tor_version_as_new_as(const char *platform, const char *cutoff)
   if (!*start) return 0;
   s = (char *)find_whitespace(start); /* also finds '\0', which is fine */
   s2 = (char*)eat_whitespace(s);
-  if (!strcmpstart(s2, "(r"))
+  if (!strcmpstart(s2, "(r") || !strcmpstart(s2, "(git-"))
     s = (char*)find_whitespace(s2);
 
   if ((size_t)(s-start+1) >= sizeof(tmp)) /* too big, no */
@@ -3421,6 +3554,23 @@ tor_version_parse(const char *s, tor_version_t *out)
   if (!strcmpstart(cp, "(r")) {
     cp += 2;
     out->svn_revision = (int) strtol(cp,&eos,10);
+  } else if (!strcmpstart(cp, "(git-")) {
+    char *close_paren = strchr(cp, ')');
+    int hexlen;
+    char digest[DIGEST_LEN];
+    if (! close_paren)
+      return -1;
+    cp += 5;
+    if (close_paren-cp > HEX_DIGEST_LEN)
+      return -1;
+    hexlen = (int)(close_paren-cp);
+    memset(digest, 0, sizeof(digest));
+    if ( hexlen == 0 || (hexlen % 2) == 1)
+      return -1;
+    if (base16_decode(digest, hexlen/2, cp, hexlen))
+      return -1;
+    memcpy(out->git_tag, digest, hexlen/2);
+    out->git_tag_len = hexlen/2;
   }
 
   return 0;
@@ -3446,8 +3596,14 @@ tor_version_compare(tor_version_t *a, tor_version_t *b)
     return i;
   else if ((i = strcmp(a->status_tag, b->status_tag)))
     return i;
+  else if ((i = a->svn_revision - b->svn_revision))
+    return i;
+  else if ((i = a->git_tag_len - b->git_tag_len))
+    return i;
+  else if (a->git_tag_len)
+    return memcmp(a->git_tag, b->git_tag, a->git_tag_len);
   else
-    return a->svn_revision - b->svn_revision;
+    return 0;
 }
 
 /** Return true iff versions <b>a</b> and <b>b</b> belong to the same series.

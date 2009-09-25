@@ -164,10 +164,11 @@ static config_var_t _option_vars[] = {
   V(BridgeRecordUsageByCountry,  BOOL,     "1"),
   V(BridgeRelay,                 BOOL,     "0"),
   V(CellStatistics,              BOOL,     "0"),
-  V(CircuitBuildTimeout,         INTERVAL, "1 minute"),
+  V(CircuitBuildTimeout,         INTERVAL, "0"),
   V(CircuitIdleTimeout,          INTERVAL, "1 hour"),
   V(ClientDNSRejectInternalAddresses, BOOL,"1"),
   V(ClientOnly,                  BOOL,     "0"),
+  V(ConsensusParams,             STRING,   NULL),
   V(ConnLimit,                   UINT,     "1000"),
   V(ConstrainedSockets,          BOOL,     "0"),
   V(ConstrainedSockSize,         MEMUNIT,  "8192"),
@@ -188,12 +189,10 @@ static config_var_t _option_vars[] = {
   V(DirPort,                     UINT,     "0"),
   V(DirPortFrontPage,            FILENAME, NULL),
   OBSOLETE("DirPostPeriod"),
-#ifdef ENABLE_DIRREQ_STATS
   OBSOLETE("DirRecordUsageByCountry"),
   OBSOLETE("DirRecordUsageGranularity"),
   OBSOLETE("DirRecordUsageRetainIPs"),
   OBSOLETE("DirRecordUsageSaveInterval"),
-#endif
   V(DirReqStatistics,            BOOL,     "0"),
   VAR("DirServer",               LINELIST, DirServers, NULL),
   V(DNSPort,                     UINT,     "0"),
@@ -210,6 +209,7 @@ static config_var_t _option_vars[] = {
   V(ExitPolicy,                  LINELIST, NULL),
   V(ExitPolicyRejectPrivate,     BOOL,     "1"),
   V(ExitPortStatistics,          BOOL,     "0"),
+  V(ExtraInfoStatistics,         BOOL,     "0"),
   V(FallbackNetworkstatusFile,   FILENAME,
     SHARE_DATADIR PATH_SEPARATOR "tor" PATH_SEPARATOR "fallback-consensus"),
   V(FascistFirewall,             BOOL,     "0"),
@@ -246,6 +246,10 @@ static config_var_t _option_vars[] = {
   V(HttpProxyAuthenticator,      STRING,   NULL),
   V(HttpsProxy,                  STRING,   NULL),
   V(HttpsProxyAuthenticator,     STRING,   NULL),
+  V(Socks4Proxy,                 STRING,   NULL),
+  V(Socks5Proxy,                 STRING,   NULL),
+  V(Socks5ProxyUsername,         STRING,   NULL),
+  V(Socks5ProxyPassword,         STRING,   NULL),
   OBSOLETE("IgnoreVersion"),
   V(KeepalivePeriod,             INTERVAL, "5 minutes"),
   VAR("Log",                     LINELIST, Logs,             NULL),
@@ -404,6 +408,10 @@ static config_var_t _state_vars[] = {
 
   V(LastRotatedOnionKey,              ISOTIME,  NULL),
   V(LastWritten,                      ISOTIME,  NULL),
+
+  V(TotalBuildTimes,                  UINT,     NULL),
+  VAR("CircuitBuildTimeBin",          LINELIST_S, BuildtimeHistogram, NULL),
+  VAR("BuildtimeHistogram",           LINELIST_V, BuildtimeHistogram, NULL),
 
   { NULL, CONFIG_TYPE_OBSOLETE, 0, NULL }
 };
@@ -592,6 +600,10 @@ static config_var_description_t options_description[] = {
 
   /* Hidden service options: HiddenService: dir,excludenodes, nodes,
    * options, port.  PublishHidServDescriptor */
+
+  /* Circuit build time histogram options */
+  { "CircuitBuildTimeBin", "Histogram of recent circuit build times"},
+  { "TotalBuildTimes", "Total number of buildtimes in histogram"},
 
   /* Nonpersistent options: __LeaveStreamsUnattached, __AllDirActionsPrivate */
   { NULL, NULL },
@@ -817,7 +829,7 @@ set_options(or_options_t *new_val, char **msg)
   return 0;
 }
 
-extern const char tor_svn_revision[]; /* from tor_main.c */
+extern const char tor_git_revision[]; /* from tor_main.c */
 
 /** The version of this Tor process, as parsed. */
 static char *_version = NULL;
@@ -827,10 +839,10 @@ const char *
 get_version(void)
 {
   if (_version == NULL) {
-    if (strlen(tor_svn_revision)) {
-      size_t len = strlen(VERSION)+strlen(tor_svn_revision)+8;
+    if (strlen(tor_git_revision)) {
+      size_t len = strlen(VERSION)+strlen(tor_git_revision)+16;
       _version = tor_malloc(len);
-      tor_snprintf(_version, len, "%s (r%s)", VERSION, tor_svn_revision);
+      tor_snprintf(_version, len, "%s (git-%s)", VERSION, tor_git_revision);
     } else {
       _version = tor_strdup(VERSION);
     }
@@ -1409,47 +1421,13 @@ options_act(or_options_t *old_options)
     tor_free(actual_fname);
   }
 
-  if (options->DirReqStatistics) {
-#ifdef ENABLE_DIRREQ_STATS
+  if (options->DirReqStatistics && !geoip_is_loaded()) {
     /* Check if GeoIP database could be loaded. */
-    if (!geoip_is_loaded()) {
-      log_warn(LD_CONFIG, "Configured to measure directory request "
-               "statistics, but no GeoIP database found!");
-      return -1;
-    }
-    log_notice(LD_CONFIG, "Configured to count directory requests by "
-               "country and write aggregate statistics to disk. Check the "
-               "dirreq-stats file in your data directory that will first "
-               "be written in 24 hours from now.");
-#else
-  log_warn(LD_CONFIG, "DirReqStatistics enabled, but Tor was built "
-           "without support for directory request statistics.");
-#endif
+    log_warn(LD_CONFIG, "Configured to measure directory request "
+             "statistics, but no GeoIP database found!");
+    return -1;
   }
 
-#ifdef ENABLE_EXIT_STATS
-  if (options->ExitPortStatistics)
-    log_notice(LD_CONFIG, "Configured to measure exit port statistics. "
-               "Look for the exit-stats file that will first be written to "
-               "the data directory in 24 hours from now.");
-#else
-  if (options->ExitPortStatistics)
-    log_warn(LD_CONFIG, "ExitPortStatistics enabled, but Tor was built "
-             "without port statistics support.");
-#endif
-
-#ifdef ENABLE_BUFFER_STATS
-  if (options->CellStatistics)
-    log_notice(LD_CONFIG, "Configured to measure cell statistics. Look "
-               "for the buffer-stats file that will first be written to "
-               "the data directory in 24 hours from now.");
-#else
-  if (options->CellStatistics)
-    log_warn(LD_CONFIG, "CellStatistics enabled, but Tor was built "
-             "without cell statistics support.");
-#endif
-
-#ifdef ENABLE_ENTRY_STATS
   if (options->EntryStatistics) {
     if (should_record_bridge_info(options)) {
       /* Don't allow measuring statistics on entry guards when configured
@@ -1462,17 +1440,9 @@ options_act(or_options_t *old_options)
       log_warn(LD_CONFIG, "Configured to measure entry node statistics, "
                "but no GeoIP database found!");
       return -1;
-    } else
-      log_notice(LD_CONFIG, "Configured to measure entry node "
-                 "statistics. Look for the entry-stats file that will "
-                 "first be written to the data directory in 24 hours "
-                 "from now.");
+    }
   }
-#else
-  if (options->EntryStatistics)
-    log_warn(LD_CONFIG, "EntryStatistics enabled, but Tor was built "
-             "without entry node statistics support.");
-#endif
+
   /* Check if we need to parse and add the EntryNodes config option. */
   if (options->EntryNodes &&
       (!old_options ||
@@ -1545,7 +1515,10 @@ expand_abbrev(config_format_t *fmt, const char *option, int command_line,
                  fmt->abbrevs[i].abbreviated,
                  fmt->abbrevs[i].full);
       }
-      return fmt->abbrevs[i].full;
+      /* Keep going through the list in case we want to rewrite it more.
+       * (We could imagine recursing here, but I don't want to get the
+       * user into an infinite loop if we craft our list wrong.) */
+      option = fmt->abbrevs[i].full;
     }
   }
   return option;
@@ -2560,7 +2533,8 @@ is_local_addr(const tor_addr_t *addr)
      * the same /24 as last_resolved_addr will be the same as checking whether
      * it was on net 0, which is already done by is_internal_IP.
      */
-    if ((last_resolved_addr & 0xffffff00ul) == (ip & 0xffffff00ul))
+    if ((last_resolved_addr & (uint32_t)0xffffff00ul)
+        == (ip & (uint32_t)0xffffff00ul))
       return 1;
   }
   return 0;
@@ -2947,11 +2921,6 @@ compute_publishserverdescriptor(or_options_t *options)
 
 /** Highest allowable value for RendPostPeriod. */
 #define MAX_DIR_PERIOD (MIN_ONION_KEY_LIFETIME/2)
-
-/** Lowest allowable value for CircuitBuildTimeout; values too low will
- * increase network load because of failing connections being retried, and
- * might prevent users from connecting to the network at all. */
-#define MIN_CIRCUIT_BUILD_TIMEOUT 30
 
 /** Lowest allowable value for MaxCircuitDirtiness; if this is too low, Tor
  * will generate too many circuits and potentially overload the network. */
@@ -3399,12 +3368,6 @@ options_validate(or_options_t *old_options, or_options_t *options,
     options->RendPostPeriod = MAX_DIR_PERIOD;
   }
 
-  if (options->CircuitBuildTimeout < MIN_CIRCUIT_BUILD_TIMEOUT) {
-    log(LOG_WARN, LD_CONFIG, "CircuitBuildTimeout option is too short; "
-      "raising to %d seconds.", MIN_CIRCUIT_BUILD_TIMEOUT);
-    options->CircuitBuildTimeout = MIN_CIRCUIT_BUILD_TIMEOUT;
-  }
-
   if (options->MaxCircuitDirtiness < MIN_MAX_CIRCUIT_DIRTINESS) {
     log(LOG_WARN, LD_CONFIG, "MaxCircuitDirtiness option is too short; "
       "raising to %d seconds.", MIN_MAX_CIRCUIT_DIRTINESS);
@@ -3482,7 +3445,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
     REJECT("Failed to parse accounting options. See logs for details.");
 
   if (options->HttpProxy) { /* parse it now */
-    if (parse_addr_port(LOG_WARN, options->HttpProxy, NULL,
+    if (tor_addr_port_parse(options->HttpProxy,
                         &options->HttpProxyAddr, &options->HttpProxyPort) < 0)
       REJECT("HttpProxy failed to parse or resolve. Please fix.");
     if (options->HttpProxyPort == 0) { /* give it a default */
@@ -3496,7 +3459,7 @@ options_validate(or_options_t *old_options, or_options_t *options,
   }
 
   if (options->HttpsProxy) { /* parse it now */
-    if (parse_addr_port(LOG_WARN, options->HttpsProxy, NULL,
+    if (tor_addr_port_parse(options->HttpsProxy,
                         &options->HttpsProxyAddr, &options->HttpsProxyPort) <0)
       REJECT("HttpsProxy failed to parse or resolve. Please fix.");
     if (options->HttpsProxyPort == 0) { /* give it a default */
@@ -3508,6 +3471,45 @@ options_validate(or_options_t *old_options, or_options_t *options,
     if (strlen(options->HttpsProxyAuthenticator) >= 48)
       REJECT("HttpsProxyAuthenticator is too long (>= 48 chars).");
   }
+
+  if (options->Socks4Proxy) { /* parse it now */
+    if (tor_addr_port_parse(options->Socks4Proxy,
+                        &options->Socks4ProxyAddr,
+                        &options->Socks4ProxyPort) <0)
+      REJECT("Socks4Proxy failed to parse or resolve. Please fix.");
+    if (options->Socks4ProxyPort == 0) { /* give it a default */
+      options->Socks4ProxyPort = 1080;
+    }
+  }
+
+  if (options->Socks5Proxy) { /* parse it now */
+    if (tor_addr_port_parse(options->Socks5Proxy,
+                            &options->Socks5ProxyAddr,
+                            &options->Socks5ProxyPort) <0)
+      REJECT("Socks5Proxy failed to parse or resolve. Please fix.");
+    if (options->Socks5ProxyPort == 0) { /* give it a default */
+      options->Socks5ProxyPort = 1080;
+    }
+  }
+
+  if (options->Socks4Proxy && options->Socks5Proxy)
+    REJECT("You cannot specify both Socks4Proxy and SOCKS5Proxy");
+
+  if (options->Socks5ProxyUsername) {
+    size_t len;
+
+    len = strlen(options->Socks5ProxyUsername);
+    if (len < 1 || len > 255)
+      REJECT("Socks5ProxyUsername must be between 1 and 255 characters.");
+
+    if (!options->Socks5ProxyPassword)
+      REJECT("Socks5ProxyPassword must be included with Socks5ProxyUsername.");
+
+    len = strlen(options->Socks5ProxyPassword);
+    if (len < 1 || len > 255)
+      REJECT("Socks5ProxyPassword must be between 1 and 255 characters.");
+  } else if (options->Socks5ProxyPassword)
+    REJECT("Socks5ProxyPassword must be included with Socks5ProxyUsername.");
 
   if (options->HashedControlPassword) {
     smartlist_t *sl = decode_hashed_passwords(options->HashedControlPassword);
@@ -3656,6 +3658,12 @@ options_validate(or_options_t *old_options, or_options_t *options,
 
   if (options->PreferTunneledDirConns && !options->TunnelDirConns)
     REJECT("Must set TunnelDirConns if PreferTunneledDirConns is set.");
+
+  if ((options->Socks4Proxy || options->Socks5Proxy) &&
+      !options->HttpProxy && !options->PreferTunneledDirConns)
+    REJECT("When Socks4Proxy or Socks5Proxy is configured, "
+           "PreferTunneledDirConns and TunnelDirConns must both be "
+           "set to 1, or HttpProxy must be configured.");
 
   if (options->AutomapHostsSuffixes) {
     SMARTLIST_FOREACH(options->AutomapHostsSuffixes, char *, suf,
@@ -3809,6 +3817,16 @@ options_transition_allowed(or_options_t *old, or_options_t *new_val,
   if (old->TestingTorNetwork != new_val->TestingTorNetwork) {
     *msg = tor_strdup("While Tor is running, changing TestingTorNetwork "
                       "is not allowed.");
+    return -1;
+  }
+
+  if (old->CellStatistics != new_val->CellStatistics ||
+      old->DirReqStatistics != new_val->DirReqStatistics ||
+      old->EntryStatistics != new_val->EntryStatistics ||
+      old->ExitPortStatistics != new_val->ExitPortStatistics) {
+    *msg = tor_strdup("While Tor is running, changing either "
+                      "CellStatistics, DirReqStatistics, EntryStatistics, "
+                      "or ExitPortStatistics is not allowed.");
     return -1;
   }
 
@@ -4264,7 +4282,7 @@ options_init_from_string(const char *cf,
  err:
   config_free(&options_format, newoptions);
   if (*msg) {
-    int len = strlen(*msg)+256;
+    int len = (int)strlen(*msg)+256;
     char *newmsg = tor_malloc(len);
 
     tor_snprintf(newmsg, len, "Failed to parse/validate config: %s", *msg);
@@ -4844,35 +4862,28 @@ config_parse_units(const char *val, struct unit_table_t *u, int *ok)
   uint64_t v = 0;
   double d = 0;
   int use_float = 0;
-
-  smartlist_t *sl;
+  char *cp;
 
   tor_assert(ok);
-  sl = smartlist_create();
-  smartlist_split_string(sl, val, NULL,
-                         SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 3);
 
-  if (smartlist_len(sl) < 1 || smartlist_len(sl) > 2) {
-    *ok = 0;
-    goto done;
-  }
-
-  v = tor_parse_uint64(smartlist_get(sl,0), 10, 0, UINT64_MAX, ok, NULL);
-  if (!*ok) {
-    int r = sscanf(smartlist_get(sl,0), "%lf", &d);
-    if (r == 0 || d < 0)
+  v = tor_parse_uint64(val, 10, 0, UINT64_MAX, ok, &cp);
+  if (!*ok || (cp && *cp == '.')) {
+    d = tor_parse_double(val, 0, UINT64_MAX, ok, &cp);
+    if (!*ok)
       goto done;
     use_float = 1;
   }
 
-  if (smartlist_len(sl) == 1) {
+  if (!cp) {
     *ok = 1;
     v = use_float ? DBL_TO_U64(d) :  v;
     goto done;
   }
 
+  cp = (char*) eat_whitespace(cp);
+
   for ( ;u->unit;++u) {
-    if (!strcasecmp(u->unit, smartlist_get(sl,1))) {
+    if (!strcasecmp(u->unit, cp)) {
       if (use_float)
         v = u->multiplier * d;
       else
@@ -4881,11 +4892,9 @@ config_parse_units(const char *val, struct unit_table_t *u, int *ok)
       goto done;
     }
   }
-  log_warn(LD_CONFIG, "Unknown unit '%s'.", (char*)smartlist_get(sl,1));
+  log_warn(LD_CONFIG, "Unknown unit '%s'.", cp);
   *ok = 0;
  done:
-  SMARTLIST_FOREACH(sl, char *, cp, tor_free(cp));
-  smartlist_free(sl);
 
   if (*ok)
     return v;
@@ -4900,7 +4909,8 @@ config_parse_units(const char *val, struct unit_table_t *u, int *ok)
 static uint64_t
 config_parse_memunit(const char *s, int *ok)
 {
-  return config_parse_units(s, memory_units, ok);
+  uint64_t u = config_parse_units(s, memory_units, ok);
+  return u;
 }
 
 /** Parse a string in the format "number unit", where unit is a unit of time.
@@ -5050,6 +5060,10 @@ or_state_set(or_state_t *new_state)
     log_warn(LD_GENERAL,"Unparseable bandwidth history state: %s",err);
     tor_free(err);
   }
+  if (circuit_build_times_parse_state(&circ_times, global_state, &err) < 0) {
+    log_warn(LD_GENERAL,"%s",err);
+    tor_free(err);
+  }
 }
 
 /** Reload the persistent state from disk, generating a new state as needed.
@@ -5182,6 +5196,7 @@ or_state_save(time_t now)
    * to avoid redundant writes. */
   entry_guards_update_state(global_state);
   rep_hist_update_state(global_state);
+  circuit_build_times_update_state(&circ_times, global_state);
   if (accounting_is_enabled(get_options()))
     accounting_run_housekeeping(now);
 

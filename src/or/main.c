@@ -830,9 +830,7 @@ run_scheduled_events(time_t now)
   static time_t time_to_clean_caches = 0;
   static time_t time_to_recheck_bandwidth = 0;
   static time_t time_to_check_for_expired_networkstatus = 0;
-#ifdef ENABLE_BUFFER_STATS
-  static time_t time_to_dump_buffer_stats = 0;
-#endif
+  static time_t time_to_write_stats_files = 0;
   static time_t time_to_retry_dns_init = 0;
   or_options_t *options = get_options();
   int i;
@@ -960,13 +958,44 @@ run_scheduled_events(time_t now)
     time_to_check_for_expired_networkstatus = now + CHECK_EXPIRED_NS_INTERVAL;
   }
 
-#ifdef ENABLE_BUFFER_STATS
-  if (time_to_dump_buffer_stats < now) {
-    if (get_options()->CellStatistics && time_to_dump_buffer_stats)
-      dump_buffer_stats();
-    time_to_dump_buffer_stats = now + DUMP_BUFFER_STATS_INTERVAL;
+  /* 1g. Check whether we should write statistics to disk.
+   */
+  if (time_to_write_stats_files >= 0 && time_to_write_stats_files < now) {
+#define WRITE_STATS_INTERVAL (24*60*60)
+    if (options->CellStatistics || options->DirReqStatistics ||
+        options->EntryStatistics || options->ExitPortStatistics) {
+      if (!time_to_write_stats_files) {
+        /* Initialize stats. */
+        if (options->CellStatistics)
+          rep_hist_buffer_stats_init(now);
+        if (options->DirReqStatistics)
+          geoip_dirreq_stats_init(now);
+        if (options->EntryStatistics)
+          geoip_entry_stats_init(now);
+        if (options->ExitPortStatistics)
+          rep_hist_exit_stats_init(now);
+        log_notice(LD_CONFIG, "Configured to measure statistics. Look for "
+                   "the *-stats files that will first be written to the "
+                   "data directory in %d hours from now.",
+                   WRITE_STATS_INTERVAL / (60 * 60));
+        time_to_write_stats_files = now + WRITE_STATS_INTERVAL;
+      } else {
+        /* Write stats to disk. */
+        if (options->CellStatistics)
+          rep_hist_buffer_stats_write(time_to_write_stats_files);
+        if (options->DirReqStatistics)
+          geoip_dirreq_stats_write(time_to_write_stats_files);
+        if (options->EntryStatistics)
+          geoip_entry_stats_write(time_to_write_stats_files);
+        if (options->ExitPortStatistics)
+          rep_hist_exit_stats_write(time_to_write_stats_files);
+        time_to_write_stats_files += WRITE_STATS_INTERVAL;
+      }
+    } else {
+      /* Never write stats to disk */
+      time_to_write_stats_files = -1;
+    }
   }
-#endif
 
   /* Remove old information from rephist and the rend cache. */
   if (time_to_clean_caches < now) {
@@ -1211,17 +1240,26 @@ second_elapsed_callback(int fd, short event, void *args)
         TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT) {
     /* every 20 minutes, check and complain if necessary */
     routerinfo_t *me = router_get_my_routerinfo();
-    if (me && !check_whether_orport_reachable())
+    if (me && !check_whether_orport_reachable()) {
       log_warn(LD_CONFIG,"Your server (%s:%d) has not managed to confirm that "
                "its ORPort is reachable. Please check your firewalls, ports, "
                "address, /etc/hosts file, etc.",
                me->address, me->or_port);
-    if (me && !check_whether_dirport_reachable())
+      control_event_server_status(LOG_WARN,
+                                  "REACHABILITY_FAILED ORADDRESS=%s:%d",
+                                  me->address, me->or_port);
+    }
+
+    if (me && !check_whether_dirport_reachable()) {
       log_warn(LD_CONFIG,
                "Your server (%s:%d) has not managed to confirm that its "
                "DirPort is reachable. Please check your firewalls, ports, "
                "address, /etc/hosts file, etc.",
                me->address, me->dir_port);
+      control_event_server_status(LOG_WARN,
+                                  "REACHABILITY_FAILED DIRADDRESS=%s:%d",
+                                  me->address, me->dir_port);
+    }
   }
 
 /** If more than this many seconds have elapsed, probably the clock
@@ -1410,8 +1448,10 @@ do_main_loop(void)
   /* initialize the bootstrap status events to know we're starting up */
   control_event_bootstrap(BOOTSTRAP_STATUS_STARTING, 0);
 
-  if (trusted_dirs_reload_certs())
-    return -1;
+  if (trusted_dirs_reload_certs()) {
+    log_warn(LD_DIR,
+             "Couldn't load all cached v3 certificates. Starting anyway.");
+  }
   if (router_reload_v2_networkstatus()) {
     return -1;
   }
@@ -1622,7 +1662,7 @@ dumpstats(int severity)
 {
   time_t now = time(NULL);
   time_t elapsed;
-  int rbuf_cap, wbuf_cap, rbuf_len, wbuf_len;
+  size_t rbuf_cap, wbuf_cap, rbuf_len, wbuf_len;
 
   log(severity, LD_GENERAL, "Dumping stats:");
 
@@ -1658,7 +1698,7 @@ dumpstats(int severity)
           log(severity, LD_GENERAL,
               "Conn %d: %d/%d bytes used on OpenSSL read buffer; "
               "%d/%d bytes used on write buffer.",
-              i, rbuf_len, rbuf_cap, wbuf_len, wbuf_cap);
+              i, (int)rbuf_len, (int)rbuf_cap, (int)wbuf_len, (int)wbuf_cap);
         }
       }
     }

@@ -361,14 +361,28 @@ circuit_purpose_to_controller_string(uint8_t purpose)
   }
 }
 
+/** Pick a reasonable package_window to start out for our circuits.
+ * Originally this was hard-coded at 1000, but now the consensus votes
+ * on the answer. See proposal 168. */
+int32_t
+circuit_initial_package_window(void)
+{
+  int32_t num = networkstatus_get_param(NULL, "circwindow", CIRCWINDOW_START);
+  /* If the consensus tells us a negative number, we'd assert. */
+  if (num < 0)
+    num = CIRCWINDOW_START;
+  return num;
+}
+
 /** Initialize the common elements in a circuit_t, and add it to the global
  * list. */
 static void
 init_circuit_base(circuit_t *circ)
 {
   circ->timestamp_created = time(NULL);
+  tor_gettimeofday(&circ->highres_created);
 
-  circ->package_window = CIRCWINDOW_START;
+  circ->package_window = circuit_initial_package_window();
   circ->deliver_window = CIRCWINDOW_START;
 
   circuit_add(circ);
@@ -394,6 +408,8 @@ origin_circuit_new(void)
   circ->remaining_relay_early_cells -= crypto_rand_int(2);
 
   init_circuit_base(TO_CIRCUIT(circ));
+
+  circ_times.last_circ_at = approx_time();
 
   return circ;
 }
@@ -447,11 +463,9 @@ circuit_free(circuit_t *circ)
       rend_data_free(ocirc->rend_data);
   } else {
     or_circuit_t *ocirc = TO_OR_CIRCUIT(circ);
-#ifdef ENABLE_BUFFER_STATS
     /* Remember cell statistics for this circuit before deallocating. */
     if (get_options()->CellStatistics)
-      add_circ_to_buffer_stats(circ, time(NULL));
-#endif
+      rep_hist_buffer_stats_add_circ(circ, time(NULL));
     mem = ocirc;
     memlen = sizeof(or_circuit_t);
     tor_assert(circ->magic == OR_CIRCUIT_MAGIC);

@@ -1,7 +1,7 @@
 
 noinst_LIBRARIES = libor.a libor-crypto.a libor-event.a
 
-EXTRA_DIST = common_sha1.i
+EXTRA_DIST = common_sha1.i sha256.c
 
 #CFLAGS  = -Wall -Wpointer-arith -O2
 
@@ -16,7 +16,7 @@ libor_a_SOURCES = address.c log.c util.c compat.c container.c mempool.c \
 libor_crypto_a_SOURCES = crypto.c aes.c tortls.c torgzip.c
 libor_event_a_SOURCES = compat_libevent.c
 
-noinst_HEADERS = address.h log.h crypto.h test.h util.h compat.h aes.h torint.h tortls.h strlcpy.c strlcat.c torgzip.h container.h ht.h mempool.h memarea.h ciphers.inc compat_libevent.h
+noinst_HEADERS = address.h log.h crypto.h util.h compat.h aes.h torint.h tortls.h strlcpy.c strlcat.c torgzip.h container.h ht.h mempool.h memarea.h ciphers.inc compat_libevent.h tortls_states.h
 
 common_sha1.i: $(libor_SOURCES) $(libor_crypto_a_SOURCES) $(noinst_HEADERS)
 	if test "@SHA1SUM@" != none; then \
@@ -29,3 +29,4 @@ common_sha1.i: $(libor_SOURCES) $(libor_crypto_a_SOURCES) $(noinst_HEADERS)
 	fi
 
 util_codedigest.o: common_sha1.i
+crypto.o: sha256.c
