@@ -14,6 +14,10 @@
 #include "or.h"
 #include "crypto.h"
 
+#ifndef MIN
+#define MIN(a,b) ((a)<(b)?(a):(b))
+#endif
+
 /*
  * This madness is needed because if we simply #undef log
  * before including or.h or log.h, we get linker collisions
@@ -454,6 +458,8 @@ circuit_build_times_parse_state(circuit_build_times_t *cbt,
                  "Too many build times in state file. "
                  "Stopping short before %d",
                  loaded_cnt+count);
+        SMARTLIST_FOREACH(args, char*, cp, tor_free(cp));
+        smartlist_free(args);
         break;
       }
 
