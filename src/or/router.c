@@ -590,6 +590,7 @@ init_keys(void)
     if (write_str_to_file(keydir, fingerprint_line, 0)) {
       log_err(LD_FS, "Error writing fingerprint line to file");
       tor_free(keydir);
+      tor_free(cp);
       return -1;
     }
   }
@@ -1311,7 +1312,7 @@ router_rebuild_descriptor(int force)
 
   policies_parse_exit_policy(options->ExitPolicy, &ri->exit_policy,
                              options->ExitPolicyRejectPrivate,
-                             ri->address);
+                             ri->address, !options->BridgeRelay);
 
   if (desc_routerinfo) { /* inherit values */
     ri->is_valid = desc_routerinfo->is_valid;

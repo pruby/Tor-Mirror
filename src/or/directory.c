@@ -333,7 +333,7 @@ directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
       return;
   }
 
-  if (DIR_PURPOSE_FETCH_CONSENSUS) {
+  if (dir_purpose == DIR_PURPOSE_FETCH_CONSENSUS) {
     networkstatus_t *v = networkstatus_get_latest_consensus();
     if (v)
       if_modified_since = v->valid_after + 180;
@@ -1689,8 +1689,8 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
              (int) body_len, conn->_base.address, conn->_base.port);
     if (status_code != 200) {
       log_warn(LD_DIR,
-        "Received http status code %d (%s) from server "
-        "'%s:%d' while fetching \"/tor/status-vote/consensus-signatures.z\".",
+        "Received http status code %d (%s) from server '%s:%d' while fetching "
+        "\"/tor/status-vote/next/consensus-signatures.z\".",
              status_code, escaped(reason), conn->_base.address,
              conn->_base.port);
       tor_free(body); tor_free(headers); tor_free(reason);

@@ -33,8 +33,8 @@ test_crypto_dh(void)
 
   memset(s1, 0, DH_BYTES);
   memset(s2, 0xFF, DH_BYTES);
-  s1len = crypto_dh_compute_secret(dh1, p2, DH_BYTES, s1, 50);
-  s2len = crypto_dh_compute_secret(dh2, p1, DH_BYTES, s2, 50);
+  s1len = crypto_dh_compute_secret(LOG_WARN, dh1, p2, DH_BYTES, s1, 50);
+  s2len = crypto_dh_compute_secret(LOG_WARN, dh2, p1, DH_BYTES, s2, 50);
   test_assert(s1len > 0);
   test_eq(s1len, s2len);
   test_memeq(s1, s2, s1len);
@@ -455,6 +455,7 @@ test_crypto_formats(void)
   strlcat(data1, " 2nd string that contains 35 chars.", 1024);
 
   i = base64_encode(data2, 1024, data1, 71);
+  test_assert(i >= 0);
   j = base64_decode(data3, 1024, data2, i);
   test_eq(j, 71);
   test_streq(data3, data1);
